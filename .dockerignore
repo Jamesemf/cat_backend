@@ -1,0 +1,18 @@
+# The backend image only needs requirements.txt + api/. Everything below is
+# either the frontend, local-only, or rebuilt inside the image.
+app/
+.git/
+.github/
+.venv/
+api/.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+**/*.db
+.env
+**/.env
+api/uploads/
+api/scripts/test_images/
+.dockerignore
+Dockerfile
+README.md

@@ -1,0 +1,61 @@
+name: API (AWS App Runner)
+
+# Backend pipeline. Only fires for backend changes. Runs the pytest suite, then
+# builds the image, pushes it to ECR, and triggers an App Runner deployment.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'api/**'
+      - 'requirements.txt'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: cats-api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Run tests
+        working-directory: api
+        run: python -m pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # allows upgrading to OIDC role auth later
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          LATEST="$REGISTRY/$ECR_REPOSITORY:latest"
+          docker build -f api/Dockerfile -t "$IMAGE" -t "$LATEST" .
+          docker push "$IMAGE"
+          docker push "$LATEST"
+
+      - name: Trigger App Runner deployment
+        run: aws apprunner start-deployment --service-arn "${{ secrets.APPRUNNER_SERVICE_ARN }}"

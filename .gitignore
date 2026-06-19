@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+web-build/
+*.tsbuildinfo
+
+# Uploaded photos
+api/uploads/
+
+# Vision smoke-test fixtures (downloaded, not authored here)
+api/scripts/test_images/
+
+# Database
+*.db
+
+# Production env for the AWS bootstrap script (contains secrets)
+scripts/prod.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+.claude
+
+secrets.txt
