@@ -32,3 +32,6 @@ Thumbs.db
 .claude
 
 secrets.txt
+
+# Transient App Runner input (contains secrets) — written and deleted by aws-bootstrap.sh
+scripts/apprunner-input.json

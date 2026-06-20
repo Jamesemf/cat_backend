@@ -247,17 +247,22 @@ PY
 EXISTING_ARN="$(aws apprunner list-services --region "$AWS_REGION" \
   --query "ServiceSummaryList[?ServiceName=='${SERVICE_NAME}'].ServiceArn | [0]" --output text 2>/dev/null || echo None)"
 
-INPUT="$(mktemp)"
+# The native (Windows) aws CLI can't read git-bash /tmp paths, so write the
+# input JSON into the repo dir and hand aws a file:// URI it understands.
+INPUT="scripts/apprunner-input.json"
+input_uri() { local p="$1"; command -v cygpath >/dev/null 2>&1 && p="$(cygpath -w "$p" | tr '\\' '/')"; printf 'file://%s' "$p"; }
+trap 'rm -f "$INPUT"' EXIT
+
 if [ "$EXISTING_ARN" != "None" ] && [ -n "$EXISTING_ARN" ]; then
   say "Updating existing App Runner service (env + network)"
   gen_input update "$EXISTING_ARN" > "$INPUT"
-  aws apprunner update-service --region "$AWS_REGION" --cli-input-json "file://$INPUT" >/dev/null
+  aws apprunner update-service --region "$AWS_REGION" --cli-input-json "$(input_uri "$INPUT")" >/dev/null
   SERVICE_ARN="$EXISTING_ARN"
 else
   say "Creating App Runner service: ${SERVICE_NAME}"
   gen_input create "$SERVICE_NAME" > "$INPUT"
   SERVICE_ARN="$(aws apprunner create-service --region "$AWS_REGION" \
-    --cli-input-json "file://$INPUT" --query Service.ServiceArn --output text)"
+    --cli-input-json "$(input_uri "$INPUT")" --query Service.ServiceArn --output text)"
 fi
 rm -f "$INPUT"
 
