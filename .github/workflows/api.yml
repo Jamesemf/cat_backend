@@ -38,10 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Keyless auth via GitHub OIDC — assumes the cats-github-actions role
+      # (no long-lived AWS keys stored in the repo). Needs id-token: write above.
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - uses: aws-actions/amazon-ecr-login@v2
