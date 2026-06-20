@@ -58,9 +58,12 @@ The pipelines assume this infrastructure already exists.
    aws ecr create-repository --repository-name cats-api --region us-east-1
    ```
 
-2. **RDS Postgres** — create an instance, then build the connection string for
-   `DATABASE_URL` (see env table). The app's `create_all` builds the schema on
-   first boot; Alembic is the planned follow-up for versioned migrations.
+2. **Postgres** — default is a managed provider ([Neon](https://neon.tech) free
+   tier: $0, no VPC setup, standard Postgres so no lock-in). Create a project,
+   copy its `postgresql://...` string into `DATABASE_URL`. To use RDS instead,
+   run the bootstrap with `CREATE_RDS=true` (provisions RDS + a VPC connector,
+   ~$15/mo). The app's `create_all` builds the schema on first boot; Alembic is
+   the planned follow-up for versioned migrations.
 
 3. **S3 bucket** for media
    ```bash
@@ -88,7 +91,7 @@ reads them case-insensitively).
 
 | Var | Prod value | Notes |
 | --- | --- | --- |
-| `DATABASE_URL` | `postgresql://USER:PASS@HOST:5432/cats` | empty/default → local SQLite |
+| `DATABASE_URL` | Neon `postgresql://…?sslmode=require` (or RDS) | empty/default → local SQLite |
 | `SECRET_KEY` | random 32-byte hex | `python -c "import secrets;print(secrets.token_hex(32))"` |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` | 7 days |
 | `S3_BUCKET` | `cats-media-prod` | **empty → local disk storage** |

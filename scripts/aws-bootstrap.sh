@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
 #
-# Provision the stateless AWS backend infra for the Cats API and deploy the
-# first image. Idempotent — safe to re-run; existing resources are reused.
+# Provision the AWS backend infra for the Cats API and deploy the first image.
+# Idempotent — safe to re-run; existing resources are reused.
 #
-#   ECR repo  ->  build & push image  ->  S3 bucket  ->  IAM roles  ->  App Runner
+#   ECR repo -> build & push image -> S3 bucket -> IAM roles
+#   -> RDS Postgres (in the default VPC) -> App Runner VPC connector
+#   -> App Runner service (reaches RDS privately via the connector)
 #
-# Prereqs: aws CLI (logged in: `aws configure`), docker, python3. Run from repo
-# root. Fill scripts/prod.env first (cp scripts/prod.env.example scripts/prod.env).
+# Prereqs: aws CLI (`aws configure`), docker, python. Run from repo root. Fill
+# scripts/prod.env first (cp scripts/prod.env.example scripts/prod.env) — set
+# DATABASE_URL to your managed Postgres (e.g. Neon).
 #
-# NOT handled here (genuinely manual — networking/cert decisions):
-#   * RDS Postgres + the App Runner VPC connector to reach it privately
-#   * Custom domain api.cats.bytebrigade.net (ACM cert + DNS validation)
-#   * CloudFront for media.cats.bytebrigade.net
-# Until RDS is wired, set DATABASE_URL in prod.env to a reachable Postgres (or
-# the service falls back to ephemeral SQLite — fine only for a smoke test).
+# DB default: external Postgres via DATABASE_URL (Neon free tier — $0, no VPC
+# setup, standard Postgres so no lock-in). Set CREATE_RDS=true to instead
+# auto-provision RDS + a VPC connector (adds ~5-10 min and ~$15/mo; the script
+# then overwrites DATABASE_URL in prod.env with the generated one).
+#
+# COST: App Runner (~$5/mo + usage) + S3 (cents). CREATE_RDS=true adds RDS
+# db.t4g.micro (~$12-15/mo).
+#
+# Still manual: custom domain (ACM cert + DNS) and CloudFront for media.
 set -euo pipefail
 
 # ----- config -------------------------------------------------------------
@@ -26,6 +32,16 @@ INSTANCE_ROLE="CatsApiInstanceRole"
 CPU="1 vCPU"
 MEMORY="2 GB"
 ENV_FILE="scripts/prod.env"
+
+CREATE_RDS="${CREATE_RDS:-false}"   # default: use external DATABASE_URL (Neon). true => provision RDS.
+DB_IDENTIFIER="cats-db"
+DB_NAME="cats"
+DB_USERNAME="cats"
+DB_INSTANCE_CLASS="db.t4g.micro"
+DB_STORAGE_GB="20"
+DB_SUBNET_GROUP="cats-db-subnets"
+SG_NAME="cats-db-sg"
+VPC_CONNECTOR_NAME="cats-vpc-connector"
 # --------------------------------------------------------------------------
 
 say() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
@@ -90,21 +106,100 @@ aws iam put-role-policy --role-name "$INSTANCE_ROLE" --policy-name cats-s3-acces
   --policy-document "$S3_POLICY" >/dev/null
 INSTANCE_ROLE_ARN="$(aws iam get-role --role-name "$INSTANCE_ROLE" --query Role.Arn --output text)"
 
-# ----- 5. App Runner service ---------------------------------------------
-EXISTING_ARN="$(aws apprunner list-services --region "$AWS_REGION" \
-  --query "ServiceSummaryList[?ServiceName=='${SERVICE_NAME}'].ServiceArn | [0]" --output text 2>/dev/null || echo None)"
+# ----- 5. RDS Postgres + networking --------------------------------------
+CONNECTOR_ARN=""
+if [ "$CREATE_RDS" = "true" ]; then
+  say "Networking: default VPC, subnets, security group"
+  VPC_ID="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true \
+    --query 'Vpcs[0].VpcId' --output text --region "$AWS_REGION")"
+  [ "$VPC_ID" != "None" ] && [ -n "$VPC_ID" ] || {
+    echo "no default VPC in $AWS_REGION — create one or set CREATE_RDS=false" >&2; exit 1; }
+  SUBNET_IDS="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$VPC_ID" \
+    --query 'Subnets[].SubnetId' --output text --region "$AWS_REGION" | tr '\t' ' ')"
 
-if [ "$EXISTING_ARN" != "None" ] && [ -n "$EXISTING_ARN" ]; then
-  say "App Runner service already exists — pushing image triggers auto-deploy"
-  aws apprunner start-deployment --service-arn "$EXISTING_ARN" --region "$AWS_REGION" >/dev/null || true
-  SERVICE_ARN="$EXISTING_ARN"
-else
-  say "Creating App Runner service: ${SERVICE_NAME}"
-  INPUT="$(mktemp)"
-  IMAGE="$IMAGE" PORT=8000 ECR_ROLE_ARN="$ECR_ROLE_ARN" INSTANCE_ROLE_ARN="$INSTANCE_ROLE_ARN" \
-  SERVICE_NAME="$SERVICE_NAME" CPU="$CPU" MEMORY="$MEMORY" ENV_FILE="$ENV_FILE" \
-  "$PYTHON" - <<'PY' > "$INPUT"
+  # One security group shared by RDS and the VPC connector, with a self-
+  # referencing 5432 rule: the connector's ENIs (in this SG) reach RDS (in this
+  # SG). RDS stays private (no public access).
+  SG_ID="$(aws ec2 describe-security-groups \
+    --filters Name=group-name,Values="$SG_NAME" Name=vpc-id,Values="$VPC_ID" \
+    --query 'SecurityGroups[0].GroupId' --output text --region "$AWS_REGION" 2>/dev/null || echo None)"
+  if [ "$SG_ID" = "None" ] || [ -z "$SG_ID" ]; then
+    SG_ID="$(aws ec2 create-security-group --group-name "$SG_NAME" \
+      --description "Cats DB + App Runner connector" --vpc-id "$VPC_ID" \
+      --query GroupId --output text --region "$AWS_REGION")"
+  fi
+  aws ec2 authorize-security-group-ingress --group-id "$SG_ID" \
+    --protocol tcp --port 5432 --source-group "$SG_ID" --region "$AWS_REGION" >/dev/null 2>&1 || true
+
+  say "RDS Postgres: ${DB_IDENTIFIER} (this can take 5-10 min)"
+  aws rds describe-db-subnet-groups --db-subnet-group-name "$DB_SUBNET_GROUP" --region "$AWS_REGION" >/dev/null 2>&1 \
+    || aws rds create-db-subnet-group --db-subnet-group-name "$DB_SUBNET_GROUP" \
+         --db-subnet-group-description "Cats DB" --subnet-ids $SUBNET_IDS --region "$AWS_REGION" >/dev/null
+
+  if ! aws rds describe-db-instances --db-instance-identifier "$DB_IDENTIFIER" --region "$AWS_REGION" >/dev/null 2>&1; then
+    DB_PASSWORD="$("$PYTHON" -c 'import secrets;print(secrets.token_urlsafe(18))')"
+    aws rds create-db-instance \
+      --db-instance-identifier "$DB_IDENTIFIER" \
+      --db-instance-class "$DB_INSTANCE_CLASS" \
+      --engine postgres \
+      --master-username "$DB_USERNAME" \
+      --master-user-password "$DB_PASSWORD" \
+      --allocated-storage "$DB_STORAGE_GB" \
+      --storage-type gp3 \
+      --storage-encrypted \
+      --db-name "$DB_NAME" \
+      --vpc-security-group-ids "$SG_ID" \
+      --db-subnet-group-name "$DB_SUBNET_GROUP" \
+      --no-publicly-accessible \
+      --no-multi-az \
+      --backup-retention-period 7 \
+      --region "$AWS_REGION" >/dev/null
+    say "Waiting for RDS to become available..."
+    aws rds wait db-instance-available --db-instance-identifier "$DB_IDENTIFIER" --region "$AWS_REGION"
+    DB_ENDPOINT="$(aws rds describe-db-instances --db-instance-identifier "$DB_IDENTIFIER" \
+      --query 'DBInstances[0].Endpoint.Address' --output text --region "$AWS_REGION")"
+    DATABASE_URL="postgresql://${DB_USERNAME}:${DB_PASSWORD}@${DB_ENDPOINT}:5432/${DB_NAME}"
+    # Persist the real URL into prod.env (gitignored) so App Runner gets it and
+    # re-runs reuse it.
+    DATABASE_URL="$DATABASE_URL" ENV_FILE="$ENV_FILE" "$PYTHON" - <<'PY'
+import os
+path, url = os.environ["ENV_FILE"], os.environ["DATABASE_URL"]
+lines = open(path).read().splitlines()
+out, found = [], False
+for ln in lines:
+    if ln.strip().startswith("DATABASE_URL="):
+        out.append("DATABASE_URL=" + url); found = True
+    else:
+        out.append(ln)
+if not found:
+    out.append("DATABASE_URL=" + url)
+open(path, "w").write("\n".join(out) + "\n")
+PY
+    say "DATABASE_URL written to ${ENV_FILE}"
+  else
+    say "RDS already exists — reusing DATABASE_URL from ${ENV_FILE}"
+  fi
+
+  say "App Runner VPC connector: ${VPC_CONNECTOR_NAME}"
+  CONNECTOR_ARN="$(aws apprunner list-vpc-connectors --region "$AWS_REGION" \
+    --query "VpcConnectors[?VpcConnectorName=='${VPC_CONNECTOR_NAME}' && Status=='ACTIVE'].VpcConnectorArn | [0]" \
+    --output text 2>/dev/null || echo None)"
+  if [ "$CONNECTOR_ARN" = "None" ] || [ -z "$CONNECTOR_ARN" ]; then
+    CONNECTOR_ARN="$(aws apprunner create-vpc-connector --vpc-connector-name "$VPC_CONNECTOR_NAME" \
+      --subnets $SUBNET_IDS --security-groups "$SG_ID" \
+      --query VpcConnector.VpcConnectorArn --output text --region "$AWS_REGION")"
+  fi
+fi
+
+# ----- 6. App Runner service ---------------------------------------------
+# Build the create/update input JSON. Reads env vars from prod.env and, when a
+# VPC connector exists, routes egress through it so RDS is reachable.
+gen_input() {  # mode(create|update), arn-or-name
+  MODE="$1" SVC="$2" IMAGE="$IMAGE" PORT=8000 ECR_ROLE_ARN="$ECR_ROLE_ARN" \
+  INSTANCE_ROLE_ARN="$INSTANCE_ROLE_ARN" CPU="$CPU" MEMORY="$MEMORY" \
+  ENV_FILE="$ENV_FILE" CONNECTOR_ARN="$CONNECTOR_ARN" "$PYTHON" - <<'PY'
 import json, os
+mode = os.environ["MODE"]
 env = {}
 with open(os.environ["ENV_FILE"]) as f:
     for line in f:
@@ -113,8 +208,7 @@ with open(os.environ["ENV_FILE"]) as f:
             continue
         k, v = line.split("=", 1)
         env[k.strip()] = v.strip()
-print(json.dumps({
-    "ServiceName": os.environ["SERVICE_NAME"],
+doc = {
     "SourceConfiguration": {
         "ImageRepository": {
             "ImageIdentifier": os.environ["IMAGE"],
@@ -136,12 +230,36 @@ print(json.dumps({
         "Protocol": "HTTP", "Path": "/health",
         "Interval": 10, "Timeout": 5, "HealthyThreshold": 1, "UnhealthyThreshold": 5,
     },
-}))
+}
+conn = os.environ.get("CONNECTOR_ARN", "")
+if conn and conn != "None":
+    doc["NetworkConfiguration"] = {
+        "EgressConfiguration": {"EgressType": "VPC", "VpcConnectorArn": conn}
+    }
+if mode == "create":
+    doc["ServiceName"] = os.environ["SVC"]
+else:
+    doc["ServiceArn"] = os.environ["SVC"]
+print(json.dumps(doc))
 PY
+}
+
+EXISTING_ARN="$(aws apprunner list-services --region "$AWS_REGION" \
+  --query "ServiceSummaryList[?ServiceName=='${SERVICE_NAME}'].ServiceArn | [0]" --output text 2>/dev/null || echo None)"
+
+INPUT="$(mktemp)"
+if [ "$EXISTING_ARN" != "None" ] && [ -n "$EXISTING_ARN" ]; then
+  say "Updating existing App Runner service (env + network)"
+  gen_input update "$EXISTING_ARN" > "$INPUT"
+  aws apprunner update-service --region "$AWS_REGION" --cli-input-json "file://$INPUT" >/dev/null
+  SERVICE_ARN="$EXISTING_ARN"
+else
+  say "Creating App Runner service: ${SERVICE_NAME}"
+  gen_input create "$SERVICE_NAME" > "$INPUT"
   SERVICE_ARN="$(aws apprunner create-service --region "$AWS_REGION" \
     --cli-input-json "file://$INPUT" --query Service.ServiceArn --output text)"
-  rm -f "$INPUT"
 fi
+rm -f "$INPUT"
 
 SERVICE_URL="$(aws apprunner describe-service --service-arn "$SERVICE_ARN" --region "$AWS_REGION" \
   --query Service.ServiceUrl --output text 2>/dev/null || echo '<pending>')"
@@ -152,13 +270,13 @@ cat <<EOF
 
   ECR image     : ${IMAGE}
   S3 bucket     : ${S3_BUCKET}
+  RDS instance  : ${DB_IDENTIFIER} (DATABASE_URL in ${ENV_FILE})
   Service ARN   : ${SERVICE_ARN}
   Service URL   : https://${SERVICE_URL}
 
 Next:
   1. Put the Service ARN into the GitHub secret APPRUNNER_SERVICE_ARN.
-  2. Wire RDS + a VPC connector, then set DATABASE_URL on the service.
-  3. Map api.cats.bytebrigade.net to the service (ACM cert + custom domain).
-  4. Migrate existing photos:
+  2. Map api.cats.bytebrigade.net to the service (ACM cert + custom domain).
+  3. Migrate existing photos:
        aws s3 cp api/uploads/ s3://${S3_BUCKET}/uploads/ --recursive
 EOF
