@@ -17,7 +17,7 @@ How the Cats app ships. Two independent, path-filtered pipelines:
    → push ECR → App Runner             (production = manual, auto-submit
    deploy                               to TestFlight)
           │                                     │
-   api.cats.bytebrigade.net            internal testers / App Store
+   api.catapp.uk            internal testers / App Store
 ```
 
 A normal release is just `git push` to `main`. Only the side you touched rebuilds.
@@ -28,8 +28,8 @@ A normal release is just `git push` to `main`. Only the side you touched rebuild
 
 | Host | Serves |
 | --- | --- |
-| `api.cats.bytebrigade.net` | Backend API (App Runner custom domain) |
-| `media.cats.bytebrigade.net` | Media CDN (CloudFront → S3), optional |
+| `api.catapp.uk` | Backend API (App Runner custom domain) |
+| `media.catapp.uk` | Media CDN (CloudFront → S3), optional |
 
 ---
 
@@ -69,14 +69,14 @@ The pipelines assume this infrastructure already exists.
    ```bash
    aws s3 mb s3://cats-media-prod --region us-east-1
    ```
-   (Optional) Put **CloudFront** in front and point `media.cats.bytebrigade.net`
+   (Optional) Put **CloudFront** in front and point `media.catapp.uk`
    at it; set `MEDIA_BASE_URL` to that domain. Without a CDN the backend serves
    presigned S3 URLs instead.
 
 4. **App Runner service**
    - Source: ECR `cats-api:latest`, with an ECR access role.
    - Port `8000`, health check path `/health`.
-   - Custom domain `api.cats.bytebrigade.net`.
+   - Custom domain `api.catapp.uk`.
    - Set the environment variables below (secrets via Secrets Manager).
    - Copy its ARN into the `APPRUNNER_SERVICE_ARN` GitHub secret.
 
@@ -96,7 +96,7 @@ reads them case-insensitively).
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` | 7 days |
 | `S3_BUCKET` | `cats-media-prod` | **empty → local disk storage** |
 | `S3_REGION` | `us-east-1` | |
-| `MEDIA_BASE_URL` | `https://media.cats.bytebrigade.net` | empty → presigned S3 URLs |
+| `MEDIA_BASE_URL` | `https://media.catapp.uk` | empty → presigned S3 URLs |
 | `STORAGE_RECONCILE_ENABLED` | `true` | background DB↔bucket sweep |
 | `STORAGE_RECONCILE_INTERVAL_HOURS` | `6` | |
 | `STORAGE_ORPHAN_GRACE_HOURS` | `24` | don't sweep uploads younger than this |
@@ -113,8 +113,8 @@ reads them case-insensitively).
 | Profile | `API_BASE` | Use |
 | --- | --- | --- |
 | `development` | LAN fallback / `app/.env` | dev client + Metro |
-| `preview` | `api.cats.bytebrigade.net` | internal testers |
-| `production` | `api.cats.bytebrigade.net` | App Store / TestFlight |
+| `preview` | `api.catapp.uk` | internal testers |
+| `production` | `api.catapp.uk` | App Store / TestFlight |
 
 - `production` builds need Apple App Store Connect credentials configured in EAS
   (`eas.json` → `submit.production`) for the workflow's `--auto-submit` to work.

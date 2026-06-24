@@ -281,7 +281,7 @@ cat <<EOF
 
 Next:
   1. Put the Service ARN into the GitHub secret APPRUNNER_SERVICE_ARN.
-  2. Map api.cats.bytebrigade.net to the service (ACM cert + custom domain).
+  2. Map api.catapp.uk to the service (ACM cert + custom domain).
   3. Migrate existing photos:
        aws s3 cp api/uploads/ s3://${S3_BUCKET}/uploads/ --recursive
 EOF
