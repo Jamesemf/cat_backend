@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     storage_orphan_grace_hours: int = 24
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-sonnet-4-6"
+    # Transactional email (Resend). When resend_api_key is empty, email sending
+    # is skipped and the reset code is logged instead (local dev). email_from
+    # must be an address on a domain verified in Resend.
+    resend_api_key: str = ""
+    email_from: str = "Cats <no-reply@catapp.uk>"
 
 
 settings = Settings()

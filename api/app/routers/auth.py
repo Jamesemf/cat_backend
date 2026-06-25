@@ -20,6 +20,7 @@ from app.schemas.auth import (
     VerifyCodeRequest,
 )
 from app.models.sighting import Sighting
+from app.models.password_reset import PasswordReset
 from app.services.auth_service import (
     create_access_token,
     decode_token,
@@ -29,12 +30,9 @@ from app.services.auth_service import (
     verify_apple_identity_token,
     verify_password,
 )
+from app.services.email import send_password_reset_code
 
 router = APIRouter(tags=["auth"])
-
-# In-memory reset code store: { email: (code, expires_at) }
-# Cleared on server restart. Use Redis or DB for production.
-_reset_codes: dict[str, tuple[str, datetime]] = {}
 
 
 @router.post("/register", response_model=TokenResponse)
@@ -125,34 +123,55 @@ def login_google(body: GoogleLoginRequest, db: Session = Depends(get_db)):
 
 @router.post("/forgot-password")
 def forgot_password(body: ForgotPasswordRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == body.email.lower()).first()
+    email = body.email.lower()
+    user = db.query(User).filter(User.email == email).first()
     if user:
         code = f"{randint(0, 999999):06d}"
-        _reset_codes[body.email.lower()] = (
-            code,
-            datetime.now(timezone.utc) + timedelta(minutes=15),
+        # Replace any outstanding code for this email, then store the new one
+        # hashed (single-use, 15-minute expiry).
+        db.query(PasswordReset).filter(PasswordReset.email == email).delete()
+        db.add(
+            PasswordReset(
+                email=email,
+                code_hash=hash_password(code),
+                expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+            )
         )
-        print(f"[PASSWORD RESET] Code for {body.email}: {code}")  # noqa: T201
+        db.commit()
+        if not send_password_reset_code(email, code):
+            # Email not configured (or send failed): log so the flow stays
+            # testable in local dev.
+            print(f"[PASSWORD RESET] Code for {email}: {code}")  # noqa: T201
     # Always return 200 to prevent email enumeration
     return {"message": "If that email is registered, a reset code has been sent."}
 
 
 @router.post("/verify-code")
-def verify_code(body: VerifyCodeRequest):
+def verify_code(body: VerifyCodeRequest, db: Session = Depends(get_db)):
     email = body.email.lower()
-    entry = _reset_codes.get(email)
+    entry = (
+        db.query(PasswordReset)
+        .filter(PasswordReset.email == email)
+        .order_by(PasswordReset.id.desc())
+        .first()
+    )
     if not entry:
         raise HTTPException(status_code=400, detail="No reset code found. Please request a new one.")
 
-    code, expires_at = entry
+    # Stored datetimes come back naive on some engines; normalise to UTC.
+    expires_at = entry.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
     if datetime.now(timezone.utc) > expires_at:
-        del _reset_codes[email]
+        db.delete(entry)
+        db.commit()
         raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
 
-    if code != body.code:
+    if not verify_password(body.code, entry.code_hash):
         raise HTTPException(status_code=400, detail="Incorrect code.")
 
-    del _reset_codes[email]
+    db.delete(entry)
+    db.commit()
     reset_token = create_access_token(
         {"sub": email, "purpose": "password_reset"},
         expires_delta=timedelta(minutes=5),
