@@ -31,8 +31,42 @@ from app.services.auth_service import (
     verify_password,
 )
 from app.services.email import send_password_reset_code
+from app.utils.profanity import contains_profanity
 
 router = APIRouter(tags=["auth"])
+
+
+def clean_display_name(name: str | None) -> str | None:
+    """Trim a display name and reject anything containing profanity.
+
+    Returns the trimmed name (or ``None`` if blank). Raises 400 when the name
+    contains a forbidden word.
+    """
+    if name is None:
+        return None
+    trimmed = name.strip()
+    if not trimmed:
+        return None
+    if contains_profanity(trimmed):
+        raise HTTPException(
+            status_code=400,
+            detail="That name isn't allowed. Please choose another.",
+        )
+    return trimmed
+
+
+def safe_display_name(name: str | None) -> str | None:
+    """Trim a display name, dropping it to ``None`` if it contains profanity.
+
+    For OAuth sign-ins where the name comes from the provider: we don't want a
+    profane name to block the login, just to never be stored.
+    """
+    if name is None:
+        return None
+    trimmed = name.strip()
+    if not trimmed or contains_profanity(trimmed):
+        return None
+    return trimmed
 
 
 @router.post("/register", response_model=TokenResponse)
@@ -42,7 +76,7 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
     user = User(
         email=body.email.lower(),
         hashed_password=hash_password(body.password),
-        display_name=body.display_name,
+        display_name=clean_display_name(body.display_name),
     )
     db.add(user)
     db.commit()
@@ -79,7 +113,7 @@ def login_apple(body: AppleLoginRequest, db: Session = Depends(get_db)):
                 status_code=400,
                 detail="Email unavailable from Apple. Please sign in again.",
             )
-        user = User(email=email.lower(), apple_sub=apple_sub, display_name=body.display_name)
+        user = User(email=email.lower(), apple_sub=apple_sub, display_name=safe_display_name(body.display_name))
         db.add(user)
         is_new = True
     elif not user.apple_sub:
@@ -110,7 +144,7 @@ def login_google(body: GoogleLoginRequest, db: Session = Depends(get_db)):
 
     is_new = False
     if not user:
-        user = User(email=email.lower(), google_sub=google_sub, display_name=display_name)
+        user = User(email=email.lower(), google_sub=google_sub, display_name=safe_display_name(display_name))
         db.add(user)
         is_new = True
     elif not user.google_sub:
@@ -211,6 +245,7 @@ def update_me(
     db: Session = Depends(get_db),
 ):
     if body.display_name is not None:
+        new_name = clean_display_name(body.display_name)
         if current_user.display_name_updated_at is not None:
             since = datetime.now(timezone.utc) - current_user.display_name_updated_at.replace(tzinfo=timezone.utc)
             if since < timedelta(days=30):
@@ -219,7 +254,7 @@ def update_me(
                     status_code=429,
                     detail=f"You can only change your name once a month. Try again in {days_left} day{'s' if days_left != 1 else ''}.",
                 )
-        current_user.display_name = body.display_name
+        current_user.display_name = new_name
         current_user.display_name_updated_at = datetime.now(timezone.utc)
     if body.avatar_emoji is not None:
         current_user.avatar_emoji = body.avatar_emoji
