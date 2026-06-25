@@ -1,9 +1,11 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 import app.models  # noqa: F401 — ensures models are registered with Base before create_all
 from app.config import settings
@@ -132,6 +134,15 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Brand assets (e.g. the email logo) served from a stable public URL so
+# transactional emails can reference https://<api>/static/logo.png. Path is
+# resolved off this module so it works regardless of the process CWD.
+app.mount(
+    "/static",
+    StaticFiles(directory=Path(__file__).parent / "static"),
+    name="static",
 )
 
 app.include_router(media.router)  # serves /uploads/* (local file or S3 redirect)

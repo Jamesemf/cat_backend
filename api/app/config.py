@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # must be an address on a domain verified in Resend.
     resend_api_key: str = ""
     email_from: str = "Cats <no-reply@catapp.uk>"
+    # Branding for the shared email layout (header logo + footer). The logo is
+    # served by this API from /static/logo.png (see main.py), so it has a stable
+    # public URL email clients can fetch.
+    email_logo_url: str = "https://api.catapp.uk/static/logo.png"
+    email_brand_name: str = "Cats"
+    email_company: str = "Amicitia Ltd"
+    email_support: str = "support@catapp.uk"
+    email_website: str = "https://catapp.uk"
 
 
 settings = Settings()
