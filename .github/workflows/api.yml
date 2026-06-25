@@ -64,13 +64,16 @@ jobs:
         # just above can kick off an automatic deployment — so a single call
         # races and fails ("isn't in RUNNING state"). Retry until the service
         # settles back to RUNNING and the call is accepted.
+        # Window must outlast a *failed* deploy's roll-back (App Runner keeps the
+        # service OPERATION_IN_PROGRESS the whole time it retries health checks),
+        # so allow ~20 min.
         run: |
           ARN="${{ secrets.APPRUNNER_SERVICE_ARN }}"
-          for i in $(seq 1 24); do
+          for i in $(seq 1 40); do
             if aws apprunner start-deployment --service-arn "$ARN"; then
               echo "deployment started"; exit 0
             fi
-            echo "service busy/not RUNNING — retry $i/24 in 20s"
-            sleep 20
+            echo "service busy/not RUNNING — retry $i/40 in 30s"
+            sleep 30
           done
-          echo "could not start deployment after ~8 min" >&2; exit 1
+          echo "could not start deployment after ~20 min" >&2; exit 1
