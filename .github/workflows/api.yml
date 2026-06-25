@@ -59,4 +59,18 @@ jobs:
           docker push "$LATEST"
 
       - name: Trigger App Runner deployment
-        run: aws apprunner start-deployment --service-arn "${{ secrets.APPRUNNER_SERVICE_ARN }}"
+        # start-deployment only works while the service is RUNNING. A service is
+        # not RUNNING mid-deploy (OPERATION_IN_PROGRESS) — and pushing :latest
+        # just above can kick off an automatic deployment — so a single call
+        # races and fails ("isn't in RUNNING state"). Retry until the service
+        # settles back to RUNNING and the call is accepted.
+        run: |
+          ARN="${{ secrets.APPRUNNER_SERVICE_ARN }}"
+          for i in $(seq 1 24); do
+            if aws apprunner start-deployment --service-arn "$ARN"; then
+              echo "deployment started"; exit 0
+            fi
+            echo "service busy/not RUNNING — retry $i/24 in 20s"
+            sleep 20
+          done
+          echo "could not start deployment after ~8 min" >&2; exit 1
