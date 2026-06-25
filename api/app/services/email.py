@@ -106,3 +106,25 @@ def send_password_reset_code(to: str, code: str) -> bool:
         "If you didn't request this, you can ignore this email."
     )
     return send_email(to, subject, render_layout(inner), text)
+
+
+def send_verification_code(to: str, code: str) -> bool:
+    """Email a 6-digit address-verification code for a new registration."""
+    subject = f"Verify your {settings.email_brand_name} email"
+    inner = f"""\
+      <h1 style="font-size:20px;font-weight:800;color:#2d2420;margin:0 0 8px;">Confirm your email</h1>
+      <p style="font-size:15px;line-height:22px;color:#9a8a82;margin:0 0 24px;">
+        Welcome to {settings.email_brand_name}! Enter this code in the app to verify your
+        email address. It expires in 15 minutes.
+      </p>
+      <div style="font-size:34px;font-weight:800;letter-spacing:8px;color:#b53920;background:#f4efe6;border-radius:12px;padding:18px 0;">
+        {code}
+      </div>
+      <p style="font-size:13px;line-height:19px;color:#9a8a82;margin:24px 0 0;">
+        If you didn't create an account, you can safely ignore this email.
+      </p>"""
+    text = _layout_text(
+        f"Welcome to {settings.email_brand_name}! Your email verification code is {code}. "
+        "It expires in 15 minutes. If you didn't create an account, you can ignore this email."
+    )
+    return send_email(to, subject, render_layout(inner), text)

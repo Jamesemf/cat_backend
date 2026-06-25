@@ -48,6 +48,7 @@ class UserOut(BaseModel):
     email: str
     display_name: str | None = None
     avatar_emoji: str | None = None
+    email_verified: bool = False
     created_at: datetime | None = None
     display_name_updated_at: datetime | None = None
 

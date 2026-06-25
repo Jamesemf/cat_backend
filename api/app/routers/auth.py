@@ -21,6 +21,7 @@ from app.schemas.auth import (
 )
 from app.models.sighting import Sighting
 from app.models.password_reset import PasswordReset
+from app.models.email_verification import EmailVerification
 from app.services.auth_service import (
     create_access_token,
     decode_token,
@@ -30,10 +31,31 @@ from app.services.auth_service import (
     verify_apple_identity_token,
     verify_password,
 )
-from app.services.email import send_password_reset_code
+from app.services.email import send_password_reset_code, send_verification_code
 from app.utils.profanity import contains_profanity
 
 router = APIRouter(tags=["auth"])
+
+
+def issue_verification_code(db: Session, email: str) -> None:
+    """Generate, store, and email a fresh email-verification code.
+
+    Replaces any outstanding code for this email, stores the new one hashed
+    (single-use, 15-minute expiry), then sends it. Falls back to logging when
+    email isn't configured so the flow stays testable in local dev.
+    """
+    code = f"{randint(0, 999999):06d}"
+    db.query(EmailVerification).filter(EmailVerification.email == email).delete()
+    db.add(
+        EmailVerification(
+            email=email,
+            code_hash=hash_password(code),
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=15),
+        )
+    )
+    db.commit()
+    if not send_verification_code(email, code):
+        print(f"[EMAIL VERIFICATION] Code for {email}: {code}")  # noqa: T201
 
 
 def clean_display_name(name: str | None) -> str | None:
@@ -77,11 +99,59 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
         email=body.email.lower(),
         hashed_password=hash_password(body.password),
         display_name=clean_display_name(body.display_name),
+        email_verified=False,
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+    # Email a verification code. The account is usable immediately (a token is
+    # returned); the app can prompt for the code and call /verify-email.
+    issue_verification_code(db, user.email)
     return TokenResponse(access_token=create_access_token({"sub": str(user.id)}))
+
+
+@router.post("/verify-email")
+def verify_email(body: VerifyCodeRequest, db: Session = Depends(get_db)):
+    """Confirm a registration's email with the 6-digit code that was emailed."""
+    email = body.email.lower()
+    entry = (
+        db.query(EmailVerification)
+        .filter(EmailVerification.email == email)
+        .order_by(EmailVerification.id.desc())
+        .first()
+    )
+    if not entry:
+        raise HTTPException(status_code=400, detail="No verification code found. Please request a new one.")
+
+    # Stored datetimes come back naive on some engines; normalise to UTC.
+    expires_at = entry.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > expires_at:
+        db.delete(entry)
+        db.commit()
+        raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
+
+    if not verify_password(body.code, entry.code_hash):
+        raise HTTPException(status_code=400, detail="Incorrect code.")
+
+    db.delete(entry)
+    user = db.query(User).filter(User.email == email).first()
+    if user:
+        user.email_verified = True
+    db.commit()
+    return {"message": "Email verified", "email_verified": True}
+
+
+@router.post("/resend-verification")
+def resend_verification(body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Re-send the email-verification code. No-op (still 200) if the email is
+    unknown or already verified, to avoid leaking which addresses exist."""
+    email = body.email.lower()
+    user = db.query(User).filter(User.email == email).first()
+    if user and not user.email_verified:
+        issue_verification_code(db, email)
+    return {"message": "If that email needs verification, a new code has been sent."}
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -113,7 +183,13 @@ def login_apple(body: AppleLoginRequest, db: Session = Depends(get_db)):
                 status_code=400,
                 detail="Email unavailable from Apple. Please sign in again.",
             )
-        user = User(email=email.lower(), apple_sub=apple_sub, display_name=safe_display_name(body.display_name))
+        # Apple has already verified the email it returns.
+        user = User(
+            email=email.lower(),
+            apple_sub=apple_sub,
+            display_name=safe_display_name(body.display_name),
+            email_verified=True,
+        )
         db.add(user)
         is_new = True
     elif not user.apple_sub:
@@ -144,7 +220,13 @@ def login_google(body: GoogleLoginRequest, db: Session = Depends(get_db)):
 
     is_new = False
     if not user:
-        user = User(email=email.lower(), google_sub=google_sub, display_name=safe_display_name(display_name))
+        # Google has already verified the email it returns.
+        user = User(
+            email=email.lower(),
+            google_sub=google_sub,
+            display_name=safe_display_name(display_name),
+            email_verified=True,
+        )
         db.add(user)
         is_new = True
     elif not user.google_sub:

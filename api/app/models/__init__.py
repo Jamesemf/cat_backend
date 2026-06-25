@@ -1,5 +1,6 @@
 from app.models.cat import Cat
 from app.models.claim import CatClaim, ClaimPhoto
+from app.models.email_verification import EmailVerification
 from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
 from app.models.follow import CatFollow
 from app.models.notification import Notification, PushToken
@@ -12,6 +13,7 @@ __all__ = [
     "CatClaim",
     "CatFollow",
     "ClaimPhoto",
+    "EmailVerification",
     "ExplorerPost",
     "Notification",
     "PasswordReset",

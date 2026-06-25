@@ -18,6 +18,10 @@ class User(Base):
     avatar_emoji: Mapped[str | None] = mapped_column(String, nullable=True)
     display_name_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Whether the email address has been confirmed via a verification code.
+    # Email/password signups start False (a code is emailed on register);
+    # Apple/Google signups are True since the provider already verified it.
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
