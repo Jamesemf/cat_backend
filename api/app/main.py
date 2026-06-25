@@ -42,13 +42,6 @@ with engine.connect() as _conn:
         if "email_verified" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 0"))
             _conn.commit()
-    else:
-        # Postgres (prod/Neon): create_all won't add a column to the existing
-        # users table. ADD COLUMN IF NOT EXISTS is idempotent on Postgres.
-        _conn.execute(_text(
-            "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE"
-        ))
-        _conn.commit()
         _c_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(cat_claims)")).fetchall()]
         if _c_cols and "real_name" not in _c_cols:
             _conn.execute(_text("ALTER TABLE cat_claims ADD COLUMN real_name TEXT"))
@@ -61,6 +54,13 @@ with engine.connect() as _conn:
         if _e_cols and "cat_id" not in _e_cols:
             _conn.execute(_text("ALTER TABLE explorer_posts ADD COLUMN cat_id INTEGER REFERENCES cats(id)"))
             _conn.commit()
+    else:
+        # Postgres (prod/Neon): create_all won't add a column to the existing
+        # users table. ADD COLUMN IF NOT EXISTS is idempotent on Postgres.
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        _conn.commit()
     # Backfill: every sighting appears in the Explorer feed exactly once.
     # Standard SQL, runs on every dialect. Idempotent — re-running inserts
     # nothing new, and inserts nothing at all on a fresh (empty) database.
