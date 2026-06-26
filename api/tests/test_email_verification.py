@@ -55,15 +55,16 @@ def _register(client, email="new@example.com", password="hunter2pw"):
     return r.json()["access_token"]
 
 
-def test_register_emails_code_and_user_starts_unverified(client):
+def test_register_emails_code_and_protected_routes_gated(client):
     token = _register(client)
     assert "new@example.com" in client.sent  # a code was issued
+    # Hard gate: an unverified account can't touch protected endpoints.
     me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
-    assert me.status_code == 200
-    assert me.json()["email_verified"] is False
+    assert me.status_code == 403
+    assert me.json()["detail"] == "email_not_verified"
 
 
-def test_verify_email_with_correct_code_flips_flag(client):
+def test_verify_email_unlocks_protected_routes(client):
     token = _register(client)
     code = client.sent["new@example.com"]
 
@@ -71,17 +72,32 @@ def test_verify_email_with_correct_code_flips_flag(client):
     bad = client.post("/auth/verify-email", json={"email": "new@example.com", "code": "000000"})
     assert bad.status_code == 400
 
+    # Still gated before verifying.
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 403
+
     # Correct code verifies.
     ok = client.post("/auth/verify-email", json={"email": "new@example.com", "code": code})
     assert ok.status_code == 200
     assert ok.json()["email_verified"] is True
 
+    # Now the same token works.
     me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
     assert me.json()["email_verified"] is True
 
     # Code is single-use: a second attempt finds nothing pending.
     again = client.post("/auth/verify-email", json={"email": "new@example.com", "code": code})
     assert again.status_code == 400
+
+
+def test_login_unverified_is_403_and_resends(client):
+    _register(client)
+    client.sent.clear()
+    r = client.post("/auth/login", json={"email": "new@example.com", "password": "hunter2pw"})
+    assert r.status_code == 403
+    assert r.json()["detail"] == "email_not_verified"
+    # A fresh code was re-sent so the user can complete verification.
+    assert "new@example.com" in client.sent
 
 
 def test_verify_email_unknown_email_400(client):

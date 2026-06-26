@@ -1,7 +1,8 @@
 name: API (AWS App Runner)
 
-# Backend pipeline. Only fires for backend changes. Runs the pytest suite, then
-# builds the image, pushes it to ECR, and triggers an App Runner deployment.
+# Backend pipeline. Only fires for backend changes. Runs the pytest suite plus a
+# Postgres boot smoke test, builds the image, pushes it to ECR, then waits for
+# the resulting App Runner deployment and fails if it rolls back.
 on:
   push:
     branches: [main]
@@ -17,6 +18,23 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      # Real Postgres so the boot smoke test exercises the prod (non-sqlite)
+      # startup path. The unit suite uses SQLite and never runs the Postgres
+      # migration branch — which is exactly where a dialect bug (e.g. a
+      # SQLite-only PRAGMA) hid and crashed prod on boot.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: cats
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,17 +47,46 @@ jobs:
         working-directory: api
         run: python -m pytest -q
 
+      - name: Boot smoke test against Postgres
+        # Boot the real app against Postgres and assert it (a) starts up — so the
+        # startup migrations run on Postgres, catching dialect bugs — and (b)
+        # enforces the verification gate. A crash here fails the build before any
+        # image is pushed, instead of silently rolling back in prod.
+        working-directory: api
+        env:
+          DATABASE_URL: postgresql+psycopg2://postgres:pw@localhost:5432/cats
+        run: |
+          set -e
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level warning &
+          PID=$!
+          trap 'kill $PID 2>/dev/null || true' EXIT
+          ok=
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/health >/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          [ -n "$ok" ] || { echo "::error::app failed to boot against Postgres"; exit 1; }
+          echo "booted OK; checking verification gate"
+          TOK=$(curl -s -X POST http://127.0.0.1:8000/auth/register \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"smoke@test.com","password":"pw12345678"}' \
+            | python -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
+          [ -n "$TOK" ] || { echo "::error::register failed"; exit 1; }
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/auth/me \
+            -H "Authorization: Bearer $TOK")
+          [ "$CODE" = "403" ] || { echo "::error::expected gated /auth/me 403, got $CODE"; exit 1; }
+          echo "smoke test passed (boot + gate)"
+
   deploy:
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # allows upgrading to OIDC role auth later
+      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v4
 
-      # Keyless auth via GitHub OIDC — assumes the cats-github-actions role
-      # (no long-lived AWS keys stored in the repo). Needs id-token: write above.
+      # Keyless auth via GitHub OIDC — assumes the cats-github-actions role.
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
@@ -58,22 +105,57 @@ jobs:
           docker push "$IMAGE"
           docker push "$LATEST"
 
-      - name: Trigger App Runner deployment
-        # start-deployment only works while the service is RUNNING. A service is
-        # not RUNNING mid-deploy (OPERATION_IN_PROGRESS) — and pushing :latest
-        # just above can kick off an automatic deployment — so a single call
-        # races and fails ("isn't in RUNNING state"). Retry until the service
-        # settles back to RUNNING and the call is accepted.
-        # Window must outlast a *failed* deploy's roll-back (App Runner keeps the
-        # service OPERATION_IN_PROGRESS the whole time it retries health checks),
-        # so allow ~20 min.
+      - name: Deploy and verify outcome
+        # The service has AutoDeployments enabled, so pushing :latest above
+        # already triggers a deployment. We wait for it, and crucially VERIFY the
+        # outcome: if the new image fails health checks App Runner rolls back to
+        # the old one (status ROLLBACK_SUCCEEDED) while still serving traffic —
+        # which previously looked "green" and masked a broken deploy. Here that
+        # fails the build.
+        #
+        # Falls back to an explicit start-deployment if no auto-deploy is seen,
+        # and degrades to non-failing if the CI role lacks read permissions
+        # (so it never produces a false red). For full rollback detection the
+        # cats-github-actions role needs apprunner:DescribeService and
+        # apprunner:ListOperations in addition to StartDeployment.
         run: |
           ARN="${{ secrets.APPRUNNER_SERVICE_ARN }}"
-          for i in $(seq 1 40); do
-            if aws apprunner start-deployment --service-arn "$ARN"; then
-              echo "deployment started"; exit 0
-            fi
-            echo "service busy/not RUNNING — retry $i/40 in 30s"
-            sleep 30
+          status() { aws apprunner describe-service --service-arn "$ARN" --query 'Service.Status' --output text 2>/dev/null; }
+
+          ST=$(status) || {
+            echo "no describe permission — firing start-deployment without verification"
+            aws apprunner start-deployment --service-arn "$ARN" || true
+            exit 0
+          }
+
+          # 1) wait up to ~3 min for the auto-deployment to begin; if none, start one.
+          started=
+          for i in $(seq 1 18); do
+            ST=$(status); echo "status: $ST"
+            [ "$ST" = "OPERATION_IN_PROGRESS" ] && { started=1; break; }
+            sleep 10
           done
-          echo "could not start deployment after ~20 min" >&2; exit 1
+          if [ -z "$started" ]; then
+            echo "no auto-deploy detected; starting one (retry until accepted)"
+            for i in $(seq 1 40); do
+              aws apprunner start-deployment --service-arn "$ARN" >/dev/null 2>&1 && { started=1; break; }
+              echo "service busy — retry $i/40 in 30s"; sleep 30
+            done
+            [ -z "$started" ] && { echo "::error::could not start a deployment"; exit 1; }
+          fi
+
+          # 2) wait for it to finish (up to ~25 min, outlasting a failed-deploy rollback)
+          for i in $(seq 1 75); do
+            ST=$(status); [ "$ST" = "RUNNING" ] && break
+            echo "deploying... ($ST) $i/75"; sleep 20
+          done
+
+          # 3) verify the latest operation didn't roll back
+          OUTCOME=$(aws apprunner list-operations --service-arn "$ARN" --max-results 1 \
+            --query 'OperationSummaryList[0].Status' --output text 2>/dev/null || echo UNKNOWN)
+          echo "latest operation outcome: $OUTCOME"
+          case "$OUTCOME" in
+            SUCCEEDED) echo "deployment verified" ;;
+            UNKNOWN)   echo "could not read operation status (missing permission?) — not failing" ;;
+            *)         echo "::error::deployment failed/rolled back: $OUTCOME"; exit 1 ;;
+          esac

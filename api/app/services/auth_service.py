@@ -76,6 +76,13 @@ def get_current_user(
     user = db.get(User, int(user_id))
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    # Hard email-verification gate: an unverified account can authenticate but
+    # cannot use any protected endpoint until it confirms its email. The app
+    # routes this 403 to the verification screen. /auth/verify-email and
+    # /auth/resend-verification take the email in the body (no token), so they
+    # stay reachable while unverified.
+    if not user.email_verified:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="email_not_verified")
     return user
 
 

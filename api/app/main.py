@@ -61,6 +61,17 @@ with engine.connect() as _conn:
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         _conn.commit()
+    # Grandfather accounts that predate email verification so enforcing it
+    # doesn't lock them out: a pre-feature user has no pending verification code
+    # (the table didn't exist when they signed up), so mark them verified. New
+    # signups always get a code row at registration, so they're left untouched
+    # and must still verify. Standard SQL, all dialects, idempotent.
+    _conn.execute(_text("""
+        UPDATE users SET email_verified = TRUE
+        WHERE email_verified = FALSE
+          AND email NOT IN (SELECT email FROM email_verifications)
+    """))
+    _conn.commit()
     # Backfill: every sighting appears in the Explorer feed exactly once.
     # Standard SQL, runs on every dialect. Idempotent — re-running inserts
     # nothing new, and inserts nothing at all on a fresh (empty) database.
