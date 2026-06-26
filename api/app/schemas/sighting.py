@@ -57,6 +57,14 @@ class FeedItem(BaseModel):
     cat_rarity_score: float | None
     cat_sighting_count: int | None
     spotter_emoji: str | None = None
+    # The Explorer post this sighting was mirrored into, plus its interaction
+    # counts — lets the Neighbourhood feed like/comment/report each spot. Older
+    # sightings logged before the mirror existed have post_id = null.
+    post_id: int | None = None
+    meow_count: int = 0
+    comment_count: int = 0
+    meowed_by_me: bool = False
+    is_mine: bool = False
 
 
 class SightingOut(BaseModel):

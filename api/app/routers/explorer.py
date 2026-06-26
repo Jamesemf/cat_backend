@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session, joinedload
 from app.db.session import get_db
 from app.models.cat import Cat
 from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
-from app.models.follow import CatFollow
 from app.models.notification import Notification
 from app.models.sighting import Sighting
 from app.models.user import User
@@ -148,7 +147,6 @@ def _get_post_or_404(db: Session, post_id: int) -> ExplorerPost:
 def get_explorer_feed(
     limit: int = 10,
     before_id: int | None = None,
-    feed: str | None = None,
     cat_id: int | None = None,
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
@@ -159,7 +157,6 @@ def get_explorer_feed(
     page. A cursor (rather than offset) keeps pages stable while new posts
     are being created above.
 
-    feed="following" restricts to posts of cats the current user follows;
     cat_id restricts to one cat's posts (its profile grid). A post belongs
     to a cat either via its direct tag or through its originating sighting.
     """
@@ -168,21 +165,7 @@ def get_explorer_feed(
     if before_id is not None:
         query = query.filter(ExplorerPost.id < before_id)
 
-    if feed == "following":
-        if not current_user:
-            raise HTTPException(status_code=401, detail="Sign in to see cats you follow.")
-        followed = [
-            row[0]
-            for row in db.query(CatFollow.cat_id)
-            .filter(CatFollow.user_id == current_user.id)
-            .all()
-        ]
-        if not followed:
-            return []
-        query = query.outerjoin(Sighting, ExplorerPost.sighting_id == Sighting.id).filter(
-            or_(ExplorerPost.cat_id.in_(followed), Sighting.cat_id.in_(followed))
-        )
-    elif cat_id is not None:
+    if cat_id is not None:
         query = query.outerjoin(Sighting, ExplorerPost.sighting_id == Sighting.id).filter(
             or_(ExplorerPost.cat_id == cat_id, Sighting.cat_id == cat_id)
         )

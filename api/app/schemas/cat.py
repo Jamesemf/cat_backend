@@ -82,11 +82,6 @@ class CatWithSightings(CatOut):
     is_following: bool = False
 
 
-class FollowResult(BaseModel):
-    following: bool
-    follower_count: int
-
-
 class TerritoryOut(BaseModel):
     cat_id: int
     sighting_count: int

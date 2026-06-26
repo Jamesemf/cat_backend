@@ -4,13 +4,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.cat import Cat
 from app.models.claim import CatClaim
-from app.models.explorer import ExplorerPost
-from app.models.follow import CatFollow
+from app.models.explorer import ExplorerPost, PostComment, PostMeow
 from app.models.notification import Notification
 from app.models.sighting import Sighting
 from app.schemas.sighting import (
@@ -257,7 +257,6 @@ def create_sighting(
     # the push goes via a background task so the response isn't delayed.
     if body.cat_id is not None:
         submitter_id = current_user.id if current_user else None
-        notified_ids: set[int] = set()
 
         claim = (
             db.query(CatClaim)
@@ -287,40 +286,6 @@ def create_sighting(
                 notif_body,
                 {"cat_id": cat.id, "sighting_id": sighting.id},
             )
-            notified_ids.add(claim.user_id)
-
-        # Followers get the news too — excluding the spotter and the owner,
-        # who already has the richer notification above.
-        follower_ids = [
-            row[0]
-            for row in db.query(CatFollow.user_id).filter(CatFollow.cat_id == cat.id).all()
-            if row[0] != submitter_id and row[0] not in notified_ids
-        ]
-        if follower_ids:
-            title = f"{cat.name or 'A cat you follow'} was spotted!"
-            notif_body = (
-                f"{cat.name or 'A cat you follow'} was just seen again. Tap to take a look."
-            )
-            for uid in follower_ids:
-                db.add(
-                    Notification(
-                        user_id=uid,
-                        type="followed_sighting",
-                        title=title,
-                        body=notif_body,
-                        cat_id=cat.id,
-                        sighting_id=sighting.id,
-                    )
-                )
-            db.commit()
-            for uid in follower_ids:
-                background_tasks.add_task(
-                    push_to_user,
-                    uid,
-                    title,
-                    notif_body,
-                    {"cat_id": cat.id, "sighting_id": sighting.id},
-                )
 
     return sighting
 
@@ -333,11 +298,14 @@ def get_feed(
     limit: int = 30,
     offset: int = 0,
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ):
     """Recent sightings enriched with their cat's name and rarity score.
 
     When lat/lng are provided, only sightings within radius_km are returned.
-    Falls back to the global feed when location is unavailable.
+    Falls back to the global feed when location is unavailable. Each item also
+    carries the interaction state of the Explorer post it was mirrored into, so
+    the Neighbourhood feed can like/comment/report each spot.
     """
     query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))
 
@@ -377,31 +345,76 @@ def get_feed(
         for cat_id, photo_path in rows:
             photos_by_cat.setdefault(cat_id, []).append(photo_path)
 
-    return [
-        FeedItem(
-            id=s.id,
-            photo_path=s.photo_path,
-            photos=photos_by_cat.get(s.cat_id, [s.photo_path]) if s.cat_id is not None else [s.photo_path],
-            latitude=s.latitude,
-            longitude=s.longitude,
-            spotted_at=s.spotted_at,
-            spotter_name=(s.user.display_name if s.user else None),
-            breed_description=s.breed_description,
-            vibes=s.vibes,
-            primary_color=s.primary_color,
-            secondary_color=s.secondary_color,
-            pattern=s.pattern,
-            fur_length=s.fur_length,
-            eye_color=s.eye_color,
-            body_size=s.body_size,
-            cat_id=s.cat_id,
-            cat_name=s.cat.name if s.cat else None,
-            cat_rarity_score=s.cat.rarity_score if s.cat else None,
-            cat_sighting_count=s.cat.sighting_count if s.cat else None,
-            spotter_emoji=s.user.avatar_emoji if s.user else None,
+    # Link each sighting to the Explorer post it was mirrored into, then batch
+    # the meow/comment counts for those posts (no N+1) so every card can show —
+    # and drive — likes, comments and reports.
+    sighting_ids = [s.id for s in sightings]
+    post_by_sighting: dict[int, ExplorerPost] = {}
+    meow_counts: dict[int, int] = {}
+    comment_counts: dict[int, int] = {}
+    my_meows: set[int] = set()
+    if sighting_ids:
+        posts = (
+            db.query(ExplorerPost)
+            .filter(ExplorerPost.sighting_id.in_(sighting_ids))
+            .all()
         )
-        for s in sightings
-    ]
+        post_by_sighting = {p.sighting_id: p for p in posts}
+        post_ids = [p.id for p in posts]
+        if post_ids:
+            meow_counts = dict(
+                db.query(PostMeow.post_id, func.count(PostMeow.id))
+                .filter(PostMeow.post_id.in_(post_ids))
+                .group_by(PostMeow.post_id)
+                .all()
+            )
+            comment_counts = dict(
+                db.query(PostComment.post_id, func.count(PostComment.id))
+                .filter(PostComment.post_id.in_(post_ids))
+                .group_by(PostComment.post_id)
+                .all()
+            )
+            if current_user:
+                my_meows = {
+                    row[0]
+                    for row in db.query(PostMeow.post_id)
+                    .filter(PostMeow.post_id.in_(post_ids), PostMeow.user_id == current_user.id)
+                    .all()
+                }
+
+    items: list[FeedItem] = []
+    for s in sightings:
+        post = post_by_sighting.get(s.id)
+        items.append(
+            FeedItem(
+                id=s.id,
+                photo_path=s.photo_path,
+                photos=photos_by_cat.get(s.cat_id, [s.photo_path]) if s.cat_id is not None else [s.photo_path],
+                latitude=s.latitude,
+                longitude=s.longitude,
+                spotted_at=s.spotted_at,
+                spotter_name=(s.user.display_name if s.user else None),
+                breed_description=s.breed_description,
+                vibes=s.vibes,
+                primary_color=s.primary_color,
+                secondary_color=s.secondary_color,
+                pattern=s.pattern,
+                fur_length=s.fur_length,
+                eye_color=s.eye_color,
+                body_size=s.body_size,
+                cat_id=s.cat_id,
+                cat_name=s.cat.name if s.cat else None,
+                cat_rarity_score=s.cat.rarity_score if s.cat else None,
+                cat_sighting_count=s.cat.sighting_count if s.cat else None,
+                spotter_emoji=s.user.avatar_emoji if s.user else None,
+                post_id=post.id if post else None,
+                meow_count=meow_counts.get(post.id, 0) if post else 0,
+                comment_count=comment_counts.get(post.id, 0) if post else 0,
+                meowed_by_me=post.id in my_meows if post else False,
+                is_mine=bool(current_user and post and post.user_id == current_user.id),
+            )
+        )
+    return items
 
 
 @router.get("", response_model=list[SightingOut])

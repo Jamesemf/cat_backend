@@ -6,8 +6,6 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from sqlalchemy import distinct
 
-from sqlalchemy.exc import IntegrityError
-
 from app.db.session import get_db
 from app.models.cat import Cat
 from app.models.claim import CatClaim
@@ -25,7 +23,6 @@ from app.schemas.cat import (
     CatOut,
     CatWithSightings,
     CountItem,
-    FollowResult,
     GlobalStats,
     TerritoryOut,
     TopCat,
@@ -349,40 +346,6 @@ def get_territory(cat_id: int, db: Session = Depends(get_db)):
         sighting_count=len(sightings),
         geojson=build_territory_geojson(cat_id, sightings),
     )
-
-
-@router.post("/{cat_id}/follow", response_model=FollowResult)
-def toggle_follow(
-    cat_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Toggle the current user's follow on a cat. Followers are notified
-    whenever the cat is spotted."""
-    cat = db.query(Cat).filter(Cat.id == cat_id).first()
-    if not cat:
-        raise HTTPException(status_code=404, detail="Cat not found")
-
-    existing = (
-        db.query(CatFollow)
-        .filter(CatFollow.cat_id == cat_id, CatFollow.user_id == current_user.id)
-        .first()
-    )
-    if existing:
-        db.delete(existing)
-        db.commit()
-        following = False
-    else:
-        db.add(CatFollow(cat_id=cat_id, user_id=current_user.id))
-        try:
-            db.commit()
-        except IntegrityError:
-            # Double-tap race: the follow already exists.
-            db.rollback()
-        following = True
-
-    count = db.query(CatFollow).filter(CatFollow.cat_id == cat_id).count()
-    return FollowResult(following=following, follower_count=count)
 
 
 @router.get("/{cat_id}", response_model=CatWithSightings)
