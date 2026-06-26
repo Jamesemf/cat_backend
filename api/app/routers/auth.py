@@ -159,6 +159,11 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email.lower()).first()
     if not user or not user.hashed_password or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    # Credentials are valid but the email was never confirmed — re-send a fresh
+    # code and tell the app to route to the verification screen.
+    if not user.email_verified:
+        issue_verification_code(db, user.email)
+        raise HTTPException(status_code=403, detail="email_not_verified")
     return TokenResponse(access_token=create_access_token({"sub": str(user.id)}))
 
 
