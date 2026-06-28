@@ -114,6 +114,7 @@ def _serialize_posts(
                 created_at=p.created_at,
                 latitude=p.latitude,
                 longitude=p.longitude,
+                user_id=p.user_id,
                 user_name=p.user.display_name if p.user else None,
                 user_emoji=p.user.avatar_emoji if p.user else None,
                 sighting_id=p.sighting_id,
@@ -402,6 +403,7 @@ def list_comments(
             post_id=c.post_id,
             body=c.body,
             created_at=c.created_at,
+            user_id=c.user_id,
             user_name=c.user.display_name if c.user else None,
             user_emoji=c.user.avatar_emoji if c.user else None,
             can_delete=bool(
@@ -474,6 +476,7 @@ def create_comment(
         post_id=comment.post_id,
         body=comment.body,
         created_at=comment.created_at,
+        user_id=current_user.id,
         user_name=current_user.display_name,
         user_emoji=current_user.avatar_emoji,
         can_delete=True,

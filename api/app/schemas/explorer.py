@@ -14,6 +14,7 @@ class ExplorerPostOut(BaseModel):
     created_at: datetime
     latitude: float | None = None
     longitude: float | None = None
+    user_id: int | None = None
     user_name: str | None = None
     user_emoji: str | None = None
     # Set when the post originated from a sighting.
@@ -40,6 +41,7 @@ class CommentOut(BaseModel):
     post_id: int
     body: str
     created_at: datetime
+    user_id: int | None = None
     user_name: str | None = None
     user_emoji: str | None = None
     # True when the requesting user may delete this comment (its author, or
