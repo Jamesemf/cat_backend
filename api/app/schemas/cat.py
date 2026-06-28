@@ -5,7 +5,23 @@ from datetime import datetime
 from pydantic import BaseModel, model_validator
 
 from app.schemas.claim import OwnerCard
-from app.schemas.media import MediaUrl, MediaUrlOpt
+from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt
+
+
+class CatNearby(BaseModel):
+    """A cat for the onboarding "is your cat here?" picker: identity is downplayed
+    (the nickname isn't the cat's real name) in favour of as many photos as we can
+    show, so a user can recognise their own cat."""
+
+    id: int
+    name: str | None
+    breed: str | None
+    last_lat: float | None
+    last_lng: float | None
+    last_seen: datetime | None
+    photos: MediaUrlList = []
+
+    model_config = {"from_attributes": True}
 
 
 class SightingOut(BaseModel):

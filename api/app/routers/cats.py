@@ -20,6 +20,7 @@ from app.routers.claims import owner_card_for_cat
 from app.schemas.cat import (
     CatCreate,
     CatMergeRequest,
+    CatNearby,
     CatOut,
     CatWithSightings,
     CountItem,
@@ -45,6 +46,32 @@ MAX_PHOTO_BYTES = 5 * 1024 * 1024
 @router.get("", response_model=list[CatOut])
 def list_cats(limit: int = 100, db: Session = Depends(get_db)):
     return db.query(Cat).order_by(Cat.last_seen.desc()).limit(limit).all()
+
+
+@router.get("/nearby", response_model=list[CatNearby])
+def list_cats_nearby(limit: int = 100, photos: int = 8, db: Session = Depends(get_db)):
+    """Cats for the onboarding picker, each with up to `photos` recent photos so a
+    user can recognise their own cat by sight rather than by an assigned nickname."""
+    cats = db.query(Cat).order_by(Cat.last_seen.desc()).limit(limit).all()
+    ids = [c.id for c in cats]
+    by_cat: dict[int, list[str]] = {}
+    if ids:
+        rows = (
+            db.query(Sighting.cat_id, Sighting.photo_path)
+            .filter(Sighting.cat_id.in_(ids), Sighting.photo_path.isnot(None))
+            .order_by(Sighting.spotted_at.desc())
+            .all()
+        )
+        for cid, path in rows:
+            lst = by_cat.setdefault(cid, [])
+            if len(lst) < photos:
+                lst.append(path)
+    out: list[CatNearby] = []
+    for c in cats:
+        item = CatNearby.model_validate(c)
+        item.photos = by_cat.get(c.id) or ([c.last_photo_path] if c.last_photo_path else [])
+        out.append(item)
+    return out
 
 
 @router.post("", response_model=CatOut, status_code=201)
