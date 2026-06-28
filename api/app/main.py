@@ -11,7 +11,7 @@ import app.models  # noqa: F401 — ensures models are registered with Base befo
 from app.config import settings
 from app.db.session import Base, SessionLocal, engine
 from app.models.cat import Cat
-from app.routers import auth, cats, claims, explorer, media, notifications, sightings
+from app.routers import auth, cats, claims, exploration, explorer, media, notifications, sightings
 from app.services.reconcile import reconcile
 from app.utils.rarity import compute_rarity_score
 
@@ -174,6 +174,7 @@ app.include_router(claims.router)
 app.include_router(notifications.router)
 app.include_router(cats.router)
 app.include_router(explorer.router)
+app.include_router(exploration.router)
 
 
 @app.get("/health")

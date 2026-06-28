@@ -20,6 +20,7 @@ from app.schemas.auth import (
     VerifyCodeRequest,
 )
 from app.models.sighting import Sighting
+from app.models.exploration import ExploredTile
 from app.models.password_reset import PasswordReset
 from app.models.email_verification import EmailVerification
 from app.services.auth_service import (
@@ -403,6 +404,7 @@ def delete_me(
     db.query(PostMeow).filter(PostMeow.user_id == uid).delete(synchronize_session=False)
     db.query(PostReport).filter(PostReport.reporter_id == uid).delete(synchronize_session=False)
     db.query(CatFollow).filter(CatFollow.user_id == uid).delete(synchronize_session=False)
+    db.query(ExploredTile).filter(ExploredTile.user_id == uid).delete(synchronize_session=False)
 
     # 4. Claims (all statuses) and their evidence photos. Verified claims
     #    vanish, so those cats become claimable again.
@@ -448,8 +450,18 @@ def get_my_stats(current_user: User = Depends(get_current_user), db: Session = D
         .distinct()
         .count()
     )
+    tiles_explored = (
+        db.query(ExploredTile).filter(ExploredTile.user_id == current_user.id).count()
+    )
+    checkpoints_lit = (
+        db.query(ExploredTile)
+        .filter(ExploredTile.user_id == current_user.id, ExploredTile.checkpoint_id.isnot(None))
+        .count()
+    )
     return UserStats(
         my_sightings=my_sightings,
         unique_cats_spotted=unique_cats,
+        tiles_explored=tiles_explored,
+        checkpoints_lit=checkpoints_lit,
         joined_at=current_user.created_at,
     )
