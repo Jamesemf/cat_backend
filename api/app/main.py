@@ -42,6 +42,9 @@ with engine.connect() as _conn:
         if "email_verified" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 0"))
             _conn.commit()
+        if "catalog_layout" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN catalog_layout TEXT"))
+            _conn.commit()
         _c_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(cat_claims)")).fetchall()]
         if _c_cols and "real_name" not in _c_cols:
             _conn.execute(_text("ALTER TABLE cat_claims ADD COLUMN real_name TEXT"))
@@ -59,6 +62,10 @@ with engine.connect() as _conn:
         # users table. ADD COLUMN IF NOT EXISTS is idempotent on Postgres.
         _conn.execute(_text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS catalog_layout TEXT"
         ))
         _conn.commit()
     # Grandfather accounts that predate email verification so enforcing it

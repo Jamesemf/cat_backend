@@ -57,6 +57,9 @@ class FeedItem(BaseModel):
     cat_rarity_score: float | None
     cat_sighting_count: int | None
     spotter_emoji: str | None = None
+    # The spotter's user id, so the feed can link to their public profile.
+    # Null for anonymous sightings (no logged-in user).
+    spotter_id: int | None = None
     # The Explorer post this sighting was mirrored into, plus its interaction
     # counts — lets the Neighbourhood feed like/comment/report each spot. Older
     # sightings logged before the mirror existed have post_id = null.
