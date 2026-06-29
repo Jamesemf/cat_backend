@@ -407,6 +407,7 @@ def get_feed(
                 cat_rarity_score=s.cat.rarity_score if s.cat else None,
                 cat_sighting_count=s.cat.sighting_count if s.cat else None,
                 spotter_emoji=s.user.avatar_emoji if s.user else None,
+                spotter_id=s.user.id if s.user else None,
                 post_id=post.id if post else None,
                 meow_count=meow_counts.get(post.id, 0) if post else 0,
                 comment_count=comment_counts.get(post.id, 0) if post else 0,
