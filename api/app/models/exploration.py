@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.session import Base
@@ -33,6 +33,11 @@ class ExploredTile(Base):
     # tiles unlocked by reveal-bombs around an explored area.
     checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
     checkpoint_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    # True for the free "home neighbourhood" tiles seeded when the user first sets
+    # their start point. These are a gift, not exploration, so they're excluded
+    # from tiles_explored (achievements + leaderboard) — mirroring the map HUD,
+    # which counts only ground the user has actually walked out and uncovered.
+    is_home: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

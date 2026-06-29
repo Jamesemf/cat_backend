@@ -147,7 +147,9 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         cat_out.append(co)
 
     tiles_explored = (
-        db.query(ExploredTile).filter(ExploredTile.user_id == user_id).count()
+        db.query(ExploredTile)
+        .filter(ExploredTile.user_id == user_id, ExploredTile.is_home.is_(False))
+        .count()
     )
 
     return PublicProfileOut(

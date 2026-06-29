@@ -10,6 +10,9 @@ class TileReport(BaseModel):
     # Present when the tile was unlocked by reaching a landmark (a checkpoint).
     checkpoint_id: str | None = Field(default=None, max_length=128)
     checkpoint_name: str | None = Field(default=None, max_length=200)
+    # True for the free home-neighbourhood seed tiles, which don't count toward
+    # tiles_explored (see ExploredTile.is_home).
+    is_home: bool = Field(default=False)
 
 
 class TilesReportRequest(BaseModel):

@@ -21,8 +21,14 @@ router = APIRouter(prefix="/exploration", tags=["exploration"])
 
 
 def _counts(db: Session, user_id: int) -> tuple[int, int]:
-    """(tiles_explored, checkpoints_lit) for a user."""
-    tiles = db.query(func.count(ExploredTile.id)).filter(ExploredTile.user_id == user_id).scalar() or 0
+    """(tiles_explored, checkpoints_lit) for a user. Home-seed tiles are a free
+    gift, not exploration, so they're excluded from the tiles_explored total."""
+    tiles = (
+        db.query(func.count(ExploredTile.id))
+        .filter(ExploredTile.user_id == user_id, ExploredTile.is_home.is_(False))
+        .scalar()
+        or 0
+    )
     checkpoints = (
         db.query(func.count(ExploredTile.id))
         .filter(ExploredTile.user_id == user_id, ExploredTile.checkpoint_id.isnot(None))
@@ -105,6 +111,7 @@ def report_tiles(
                     tile_key=key,
                     checkpoint_id=t.checkpoint_id,
                     checkpoint_name=t.checkpoint_name,
+                    is_home=t.is_home,
                 )
             )
         elif t.checkpoint_id is not None and row.checkpoint_id is None:

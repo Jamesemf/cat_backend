@@ -32,6 +32,15 @@ with engine.connect() as _conn:
         if "user_id" not in _s_cols:
             _conn.execute(_text("ALTER TABLE sightings ADD COLUMN user_id INTEGER REFERENCES users(id)"))
             _conn.commit()
+        if "frame_id" not in _s_cols:
+            _conn.execute(_text("ALTER TABLE sightings ADD COLUMN frame_id TEXT"))
+            _conn.commit()
+        if "photo_adjust" not in _s_cols:
+            _conn.execute(_text("ALTER TABLE sightings ADD COLUMN photo_adjust TEXT"))
+            _conn.commit()
+        if "caption" not in _s_cols:
+            _conn.execute(_text("ALTER TABLE sightings ADD COLUMN caption TEXT"))
+            _conn.commit()
         _u_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(users)")).fetchall()]
         if "avatar_emoji" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN avatar_emoji TEXT"))
@@ -57,6 +66,10 @@ with engine.connect() as _conn:
         if _e_cols and "cat_id" not in _e_cols:
             _conn.execute(_text("ALTER TABLE explorer_posts ADD COLUMN cat_id INTEGER REFERENCES cats(id)"))
             _conn.commit()
+        _et_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(explored_tiles)")).fetchall()]
+        if _et_cols and "is_home" not in _et_cols:
+            _conn.execute(_text("ALTER TABLE explored_tiles ADD COLUMN is_home BOOLEAN NOT NULL DEFAULT 0"))
+            _conn.commit()
     else:
         # Postgres (prod/Neon): create_all won't add a column to the existing
         # users table. ADD COLUMN IF NOT EXISTS is idempotent on Postgres.
@@ -66,6 +79,22 @@ with engine.connect() as _conn:
         _conn.commit()
         _conn.execute(_text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS catalog_layout TEXT"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE sightings ADD COLUMN IF NOT EXISTS frame_id TEXT"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE sightings ADD COLUMN IF NOT EXISTS photo_adjust TEXT"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE sightings ADD COLUMN IF NOT EXISTS caption TEXT"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE explored_tiles ADD COLUMN IF NOT EXISTS is_home BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         _conn.commit()
     # Grandfather accounts that predate email verification so enforcing it
