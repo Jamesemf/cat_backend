@@ -136,3 +136,15 @@ class GlobalStats(BaseModel):
     top_patterns: list[CountItem]
     top_fur_lengths: list[CountItem]
     most_spotted: TopCat | None
+
+
+class LeaderboardRow(BaseModel):
+    user_id: int
+    display_name: str | None
+    avatar_emoji: str | None
+    value: int
+
+
+class Leaderboards(BaseModel):
+    total_sightings: list[LeaderboardRow]
+    tiles_explored: list[LeaderboardRow]
