@@ -21,6 +21,15 @@ router = APIRouter(prefix="/users", tags=["users"])
 MAX_PROFILE_CATS = 60
 
 
+class PhotoAdjust(BaseModel):
+    """How a cat's cover photo is positioned in its square frame: zoom (>=1) and a
+    normalised pan in [-1, 1] per axis."""
+
+    scale: float = 1.0
+    x: float = 0.0
+    y: float = 0.0
+
+
 class PublicProfileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -30,31 +39,48 @@ class PublicProfileOut(BaseModel):
     cats_spotted: int
     tiles_explored: int
     # Cats ordered the way the owner arranged their Cat-a-log (unranked cats fall
-    # to the end, newest first), with their chosen polaroid frame per cat.
+    # to the end, newest first), with their chosen polaroid frame and the pan/zoom
+    # of each cover photo per cat.
     cats: list[CatOut]
     frames: dict[str, str] = {}
+    adjusts: dict[str, PhotoAdjust] = {}
 
 
 class CatalogLayoutIn(BaseModel):
-    """The owner's Cat-a-log arrangement: card order and per-cat frame choices."""
+    """The owner's Cat-a-log arrangement: card order, per-cat frame choices,
+    per-cat cover photo (catId -> raw storage key), and per-cat photo pan/zoom."""
 
     order: list[int] = []
     frames: dict[str, str] = {}
+    covers: dict[str, str] = {}
+    adjusts: dict[str, PhotoAdjust] = {}
 
 
-def _parse_layout(raw: str | None) -> tuple[list[int], dict[str, str]]:
-    """Decode a stored catalog_layout JSON blob into (order, frames). Tolerates
-    null/corrupt data by returning empties (the default arrangement)."""
+def _parse_layout(
+    raw: str | None,
+) -> tuple[list[int], dict[str, str], dict[str, str], dict[str, PhotoAdjust]]:
+    """Decode a stored catalog_layout JSON blob into (order, frames, covers,
+    adjusts). Tolerates null/corrupt data by returning empties (the default)."""
     if not raw:
-        return [], {}
+        return [], {}, {}, {}
     try:
         data = json.loads(raw)
         order = [int(x) for x in data.get("order", []) if isinstance(x, (int, str))]
         frames_raw = data.get("frames", {})
         frames = {str(k): str(v) for k, v in frames_raw.items()} if isinstance(frames_raw, dict) else {}
-        return order, frames
+        covers_raw = data.get("covers", {})
+        covers = {str(k): str(v) for k, v in covers_raw.items()} if isinstance(covers_raw, dict) else {}
+        adjusts_raw = data.get("adjusts", {})
+        adjusts: dict[str, PhotoAdjust] = {}
+        if isinstance(adjusts_raw, dict):
+            for k, v in adjusts_raw.items():
+                try:
+                    adjusts[str(k)] = PhotoAdjust.model_validate(v)
+                except (ValueError, TypeError):
+                    continue
+        return order, frames, covers, adjusts
     except (ValueError, TypeError, AttributeError):
-        return [], {}
+        return [], {}, {}, {}
 
 
 @router.put("/me/catalog", status_code=204)
@@ -65,7 +91,14 @@ def update_my_catalog(
 ):
     """Save how the current user has arranged their Cat-a-log so it shows the
     same way on their public profile. Cosmetic and idempotent."""
-    current_user.catalog_layout = json.dumps({"order": body.order, "frames": body.frames})
+    current_user.catalog_layout = json.dumps(
+        {
+            "order": body.order,
+            "frames": body.frames,
+            "covers": body.covers,
+            "adjusts": {k: v.model_dump() for k, v in body.adjusts.items()},
+        }
+    )
     db.commit()
 
 
@@ -98,10 +131,20 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
     # Apply the owner's saved arrangement: cats they've ranked come first in that
     # order, anything unranked keeps the newest-first fallback. A stable sort on
     # the already-sorted list preserves that tail order.
-    order, frames = _parse_layout(user.catalog_layout)
+    order, frames, covers, adjusts = _parse_layout(user.catalog_layout)
     if order:
         rank = {cat_id: i for i, cat_id in enumerate(order)}
         cats.sort(key=lambda c: rank.get(c.id, len(order)))
+
+    # Swap in each cat's chosen cover photo (a raw storage key, re-resolved to a
+    # URL on output) so the public card matches what the owner highlighted.
+    cat_out: list[CatOut] = []
+    for c in cats:
+        co = CatOut.model_validate(c)
+        cover = covers.get(str(c.id))
+        if cover:
+            co.last_photo_path = cover
+        cat_out.append(co)
 
     tiles_explored = (
         db.query(ExploredTile).filter(ExploredTile.user_id == user_id).count()
@@ -113,6 +156,7 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         avatar_emoji=user.avatar_emoji,
         cats_spotted=len(cat_ids),
         tiles_explored=tiles_explored,
-        cats=[CatOut.model_validate(c) for c in cats],
+        cats=cat_out,
         frames=frames,
+        adjusts=adjusts,
     )

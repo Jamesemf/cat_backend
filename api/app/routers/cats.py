@@ -25,6 +25,7 @@ from app.schemas.cat import (
     CatWithSightings,
     CountItem,
     GlobalStats,
+    MyPhotoOut,
     TerritoryOut,
     TopCat,
 )
@@ -357,6 +358,22 @@ def list_my_cats(
         db.query(Cat)
         .filter(Cat.id.in_(cat_ids))
         .order_by(Cat.last_seen.desc())
+        .all()
+    )
+
+
+@router.get("/{cat_id}/my-photos", response_model=list[MyPhotoOut])
+def list_my_photos_of_cat(
+    cat_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """The current user's own photos of a cat (newest first) — the candidates for
+    which one they highlight on that cat's Cat-a-log card."""
+    return (
+        db.query(Sighting)
+        .filter(Sighting.user_id == current_user.id, Sighting.cat_id == cat_id)
+        .order_by(Sighting.spotted_at.desc())
         .all()
     )
 

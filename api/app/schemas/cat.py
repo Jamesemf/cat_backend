@@ -53,6 +53,18 @@ class SightingOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class MyPhotoOut(BaseModel):
+    """One of the current user's own photos of a cat — candidates for the photo
+    they highlight on that cat's Cat-a-log card. photo_path is the raw storage
+    key (not a resolved URL) so the client can round-trip it as the saved cover;
+    the client resolves it for display."""
+
+    photo_path: str
+    spotted_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class CatCreate(BaseModel):
     name: str | None = None
     breed: str | None = None
