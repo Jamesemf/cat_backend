@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 from datetime import date, datetime, timezone
@@ -18,6 +19,7 @@ from app.schemas.sighting import (
     MatchCandidate,
     MatchCheckRequest,
     MatchCheckResponse,
+    PolaroidUpdate,
     SightingAnalysis,
     SightingAssign,
     SightingCommit,
@@ -27,7 +29,7 @@ from app.services.vision import VisionError, analyze_cat_photo, generate_cat_nic
 from sqlalchemy.orm import joinedload
 
 from app.models.user import User
-from app.services.auth_service import get_optional_user
+from app.services.auth_service import get_current_user, get_optional_user
 from app.services.push import push_to_user
 from app.services.storage import UPLOADS_PREFIX, get_storage
 from app.utils.matching import find_match_candidates, haversine_km
@@ -233,6 +235,9 @@ def create_sighting(
         eye_color=body.eye_color,
         body_size=body.body_size,
         features_json=body.features_json,
+        frame_id=body.frame_id,
+        photo_adjust=json.dumps(body.photo_adjust.model_dump()) if body.photo_adjust else None,
+        caption=body.caption,
     )
     db.add(sighting)
     db.commit()
@@ -413,9 +418,46 @@ def get_feed(
                 comment_count=comment_counts.get(post.id, 0) if post else 0,
                 meowed_by_me=post.id in my_meows if post else False,
                 is_mine=bool(current_user and post and post.user_id == current_user.id),
+                frame_id=s.frame_id,
+                photo_adjust=s.photo_adjust,
+                caption=s.caption,
             )
         )
     return items
+
+
+@router.patch("/{sighting_id}/polaroid", response_model=SightingOut)
+def update_polaroid(
+    sighting_id: int,
+    body: PolaroidUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Update the spotter's polaroid keepsake (frame, framing, caption).
+
+    Owner-only: the customization shows to everyone in the Nearby feed, so only
+    the user who logged the sighting may change it. Only the fields present in
+    the request body are applied (a sent null clears that field).
+    """
+    sighting = db.query(Sighting).filter(Sighting.id == sighting_id).first()
+    if not sighting:
+        raise HTTPException(status_code=404, detail="Sighting not found.")
+    if sighting.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your sighting.")
+
+    fields = body.model_dump(exclude_unset=True)
+    if "frame_id" in fields:
+        sighting.frame_id = fields["frame_id"]
+    if "caption" in fields:
+        sighting.caption = fields["caption"]
+    if "photo_adjust" in fields:
+        sighting.photo_adjust = (
+            json.dumps(body.photo_adjust.model_dump()) if body.photo_adjust else None
+        )
+
+    db.commit()
+    db.refresh(sighting)
+    return sighting
 
 
 @router.get("", response_model=list[SightingOut])

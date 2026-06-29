@@ -32,5 +32,14 @@ class Sighting(Base):
     # Free-text and raw payload kept off the indexed path.
     features_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Polaroid keepsake customization, set by the spotter in the Nearby feed /
+    # capture flow. frame_id names a style in the client's polaroidStyles;
+    # photo_adjust holds the pan/zoom as JSON {scale, x, y}; caption replaces the
+    # film-stamp date when set. All nullable — older sightings render the default
+    # polaroid.
+    frame_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    photo_adjust: Mapped[str | None] = mapped_column(Text, nullable=True)
+    caption: Mapped[str | None] = mapped_column(String, nullable=True)
+
     cat  = relationship("Cat",  backref="sightings")
     user = relationship("User", foreign_keys=[user_id])

@@ -1,8 +1,35 @@
+import json
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt
+
+
+class PhotoAdjust(BaseModel):
+    """How a polaroid photo is panned/zoomed within its frame.
+
+    Mirrors the client's PhotoAdjust: scale is 1 (cover fit) to 3 (max zoom);
+    x/y are the pan as a fraction of the overflow in [-1, 1].
+    """
+    scale: float = 1.0
+    x: float = 0.0
+    y: float = 0.0
+
+
+def _parse_photo_adjust(value):
+    """Accept the column's JSON-string form (or a dict) for photo_adjust.
+
+    Sightings persist the adjust as a JSON string; this lets a model populated
+    `from_attributes` (or built directly) coerce it into a PhotoAdjust. Bad or
+    empty values fall back to None so a malformed row never breaks the feed.
+    """
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    return value
 
 
 class MatchCandidate(BaseModel):
@@ -68,6 +95,13 @@ class FeedItem(BaseModel):
     comment_count: int = 0
     meowed_by_me: bool = False
     is_mine: bool = False
+    # Spotter's polaroid customization for this sighting. Null fields render the
+    # default polaroid (classic frame, cover-fit, date stamp).
+    frame_id: str | None = None
+    photo_adjust: PhotoAdjust | None = None
+    caption: str | None = None
+
+    _parse_adjust = field_validator("photo_adjust", mode="before")(_parse_photo_adjust)
 
 
 class SightingOut(BaseModel):
@@ -90,11 +124,28 @@ class SightingOut(BaseModel):
     body_size: str | None = None
     features_json: str | None = None
 
+    frame_id: str | None = None
+    photo_adjust: PhotoAdjust | None = None
+    caption: str | None = None
+
+    _parse_adjust = field_validator("photo_adjust", mode="before")(_parse_photo_adjust)
+
     model_config = {"from_attributes": True}
 
 
 class SightingAssign(BaseModel):
     cat_id: int
+
+
+class PolaroidUpdate(BaseModel):
+    """Body for PATCH /sightings/{id}/polaroid — owner edits their keepsake.
+
+    All fields optional; only those provided are updated. Send null explicitly
+    to clear a field (e.g. caption back to the date stamp).
+    """
+    frame_id: str | None = None
+    photo_adjust: PhotoAdjust | None = None
+    caption: str | None = None
 
 
 class SightingAnalysis(BaseModel):
@@ -140,3 +191,7 @@ class SightingCommit(BaseModel):
     body_size: str | None = None
     breed: str | None = None
     features_json: str | None = None
+    # Polaroid keepsake customization chosen in the capture flow (all optional).
+    frame_id: str | None = None
+    photo_adjust: PhotoAdjust | None = None
+    caption: str | None = None
