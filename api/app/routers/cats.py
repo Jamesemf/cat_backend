@@ -4,12 +4,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
-from sqlalchemy import distinct
+from sqlalchemy import distinct, func
 
 from app.db.session import get_db
 from app.models.cat import Cat
 from app.models.claim import CatClaim
 from app.models.explorer import ExplorerPost
+from app.models.exploration import ExploredTile
 from app.models.follow import CatFollow
 from app.models.notification import Notification
 from app.models.sighting import Sighting
@@ -25,6 +26,8 @@ from app.schemas.cat import (
     CatWithSightings,
     CountItem,
     GlobalStats,
+    LeaderboardRow,
+    Leaderboards,
     MyPhotoOut,
     TerritoryOut,
     TopCat,
@@ -338,6 +341,40 @@ def get_global_stats(db: Session = Depends(get_db)):
         top_patterns=patterns,
         top_fur_lengths=fur_lengths,
         most_spotted=most_spotted,
+    )
+
+
+@router.get("/stats/leaderboard", response_model=Leaderboards)
+def get_leaderboard(db: Session = Depends(get_db)):
+    """Public top-20 rankings of spotters by total sightings and tiles explored."""
+
+    def rank_by(count_col, join_model) -> list[LeaderboardRow]:
+        rows = (
+            db.query(
+                User.id,
+                User.display_name,
+                User.avatar_emoji,
+                func.count(count_col).label("value"),
+            )
+            .join(join_model, join_model.user_id == User.id)
+            .group_by(User.id)
+            .order_by(func.count(count_col).desc())
+            .limit(20)
+            .all()
+        )
+        return [
+            LeaderboardRow(
+                user_id=r.id,
+                display_name=r.display_name,
+                avatar_emoji=r.avatar_emoji,
+                value=r.value,
+            )
+            for r in rows
+        ]
+
+    return Leaderboards(
+        total_sightings=rank_by(Sighting.id, Sighting),
+        tiles_explored=rank_by(ExploredTile.id, ExploredTile),
     )
 
 
