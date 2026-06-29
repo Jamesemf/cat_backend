@@ -451,7 +451,9 @@ def get_my_stats(current_user: User = Depends(get_current_user), db: Session = D
         .count()
     )
     tiles_explored = (
-        db.query(ExploredTile).filter(ExploredTile.user_id == current_user.id).count()
+        db.query(ExploredTile)
+        .filter(ExploredTile.user_id == current_user.id, ExploredTile.is_home.is_(False))
+        .count()
     )
     checkpoints_lit = (
         db.query(ExploredTile)

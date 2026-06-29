@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from app.schemas.claim import OwnerCard
 from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt
+from app.schemas.sighting import PhotoAdjust, _parse_photo_adjust
 
 
 class CatNearby(BaseModel):
@@ -32,6 +33,10 @@ class SightingOut(BaseModel):
     longitude: float
     spotted_at: datetime
     spotter_name: str | None
+    # The spotter's polaroid keepsake for this sighting (null = default polaroid).
+    frame_id: str | None = None
+    photo_adjust: PhotoAdjust | None = None
+    caption: str | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -48,7 +53,12 @@ class SightingOut(BaseModel):
             "longitude": data.longitude,
             "spotted_at": data.spotted_at,
             "spotter_name": display_name,
+            "frame_id": data.frame_id,
+            "photo_adjust": data.photo_adjust,
+            "caption": data.caption,
         }
+
+    _parse_adjust = field_validator("photo_adjust", mode="before")(_parse_photo_adjust)
 
     model_config = {"from_attributes": True}
 

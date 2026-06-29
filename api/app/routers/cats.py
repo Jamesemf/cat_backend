@@ -348,8 +348,8 @@ def get_global_stats(db: Session = Depends(get_db)):
 def get_leaderboard(db: Session = Depends(get_db)):
     """Public top-20 rankings of spotters by total sightings and tiles explored."""
 
-    def rank_by(count_col, join_model) -> list[LeaderboardRow]:
-        rows = (
+    def rank_by(count_col, join_model, extra_filter=None) -> list[LeaderboardRow]:
+        q = (
             db.query(
                 User.id,
                 User.display_name,
@@ -357,7 +357,11 @@ def get_leaderboard(db: Session = Depends(get_db)):
                 func.count(count_col).label("value"),
             )
             .join(join_model, join_model.user_id == User.id)
-            .group_by(User.id)
+        )
+        if extra_filter is not None:
+            q = q.filter(extra_filter)
+        rows = (
+            q.group_by(User.id)
             .order_by(func.count(count_col).desc())
             .limit(20)
             .all()
@@ -374,7 +378,8 @@ def get_leaderboard(db: Session = Depends(get_db)):
 
     return Leaderboards(
         total_sightings=rank_by(Sighting.id, Sighting),
-        tiles_explored=rank_by(ExploredTile.id, ExploredTile),
+        # Home-seed tiles are free, so they don't count toward the ranking.
+        tiles_explored=rank_by(ExploredTile.id, ExploredTile, ExploredTile.is_home.is_(False)),
     )
 
 
