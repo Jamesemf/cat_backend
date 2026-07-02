@@ -1,6 +1,6 @@
 # Deployment runbook
 
-How the Cats app ships. Two independent, path-filtered pipelines:
+How the Meow Map app ships. Two independent, path-filtered pipelines:
 
 | Side | Path trigger | Pipeline | Target |
 | --- | --- | --- | --- |
@@ -92,8 +92,11 @@ reads them case-insensitively).
 | Var | Prod value | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | Neon `postgresql://…?sslmode=require` (or RDS) | empty/default → local SQLite |
-| `SECRET_KEY` | random 32-byte hex | `python -c "import secrets;print(secrets.token_hex(32))"` |
+| `SECRET_KEY` | random 32-byte hex | **required** — the app refuses to boot on a non-SQLite DB with the default/short key. `python -c "import secrets;print(secrets.token_hex(32))"` |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` | 7 days |
+| `CORS_ALLOW_ORIGINS` | `*` (or your web origin) | comma-separated; `*` is safe (Bearer-token auth, no cookies) |
+| `GOOGLE_CLIENT_ID` | your Google OAuth client id | when set, Google sign-in verifies token audience (blocks token-substitution takeover) |
+| `APPLE_CLIENT_ID` | your Apple bundle id | when set, Apple sign-in verifies token audience |
 | `S3_BUCKET` | `cats-media-prod` | **empty → local disk storage** |
 | `S3_REGION` | `us-east-1` | |
 | `MEDIA_BASE_URL` | `https://media.catapp.uk` | empty → presigned S3 URLs |

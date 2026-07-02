@@ -1,6 +1,6 @@
-# Cats — Backend
+# Meow Map — Backend
 
-FastAPI service for the Cats app: cat sighting catalog, Re-ID matching, ownership
+FastAPI service for the Meow Map app: cat sighting catalog, Re-ID matching, ownership
 claims, Explorer feed, and Claude vision recognition. The Expo/React Native
 client lives in a separate repository.
 

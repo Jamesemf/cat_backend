@@ -31,6 +31,10 @@ class User(Base):
     # Email/password signups start False (a code is emailed on register);
     # Apple/Google signups are True since the provider already verified it.
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Grants access to catalog-maintenance endpoints (merge duplicate cats,
+    # recompute rarity, create bare cat rows). Off for everyone by default; set
+    # directly in the DB for trusted operators.
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
