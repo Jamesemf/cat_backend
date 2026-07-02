@@ -37,6 +37,11 @@ from app.utils.profanity import contains_profanity
 
 router = APIRouter(tags=["auth"])
 
+# A 6-digit code is only safe if it can't be ground down within its 15-minute
+# window. Invalidate it after this many wrong guesses, forcing the attacker to
+# request a fresh code (which also re-randomises the target).
+MAX_CODE_ATTEMPTS = 5
+
 
 def issue_verification_code(db: Session, email: str) -> None:
     """Generate, store, and email a fresh email-verification code.
@@ -134,6 +139,15 @@ def verify_email(body: VerifyCodeRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
 
     if not verify_password(body.code, entry.code_hash):
+        entry.attempts += 1
+        if entry.attempts >= MAX_CODE_ATTEMPTS:
+            db.delete(entry)
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="Too many incorrect attempts. Please request a new code.",
+            )
+        db.commit()
         raise HTTPException(status_code=400, detail="Incorrect code.")
 
     db.delete(entry)
@@ -290,6 +304,15 @@ def verify_code(body: VerifyCodeRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Code expired. Please request a new one.")
 
     if not verify_password(body.code, entry.code_hash):
+        entry.attempts += 1
+        if entry.attempts >= MAX_CODE_ATTEMPTS:
+            db.delete(entry)
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="Too many incorrect attempts. Please request a new code.",
+            )
+        db.commit()
         raise HTTPException(status_code=400, detail="Incorrect code.")
 
     db.delete(entry)

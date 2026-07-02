@@ -16,6 +16,9 @@ class PasswordReset(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String, index=True, nullable=False)
     code_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # Wrong-guess counter. The code is invalidated once this hits the cap so a
+    # short numeric code can't be brute-forced within its validity window.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)

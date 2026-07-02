@@ -1,4 +1,4 @@
-# Backend image for the Cats FastAPI service.
+# Backend image for the Meow Map FastAPI service.
 #
 # Build context is the REPO ROOT (requirements.txt lives there, code in api/):
 #   docker build -f api/Dockerfile -t cats-api .

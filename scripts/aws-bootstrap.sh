@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Provision the AWS backend infra for the Cats API and deploy the first image.
+# Provision the AWS backend infra for the Meow Map API and deploy the first image.
 # Idempotent — safe to re-run; existing resources are reused.
 #
 #   ECR repo -> build & push image -> S3 bucket -> IAM roles

@@ -55,6 +55,9 @@ jobs:
         working-directory: api
         env:
           DATABASE_URL: postgresql+psycopg2://postgres:pw@localhost:5432/cats
+          # A non-SQLite DB now requires a strong SECRET_KEY (startup fail-fast);
+          # supply a throwaway one for the smoke boot.
+          SECRET_KEY: ci-smoke-test-secret-key-0123456789abcdef
         run: |
           set -e
           uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level warning &

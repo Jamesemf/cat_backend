@@ -21,7 +21,13 @@ def serve_upload(subpath: str):
     storage = get_storage()
 
     if isinstance(storage, LocalStorage):
-        path = storage._path(key)
+        # _path raises ValueError for keys that escape the uploads root (e.g. a
+        # "../../etc/passwd" traversal). Treat that as a plain 404 rather than
+        # leaking a 500 — no file is disclosed either way.
+        try:
+            path = storage._path(key)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Not found.")
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Not found.")
         return FileResponse(path)

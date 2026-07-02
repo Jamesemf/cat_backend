@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db.session import get_db
 from app.models.user import User
+
+log = logging.getLogger(__name__)
 
 _security = HTTPBearer()
 
@@ -86,12 +89,49 @@ def get_current_user(
     return user
 
 
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Gate catalog-maintenance endpoints to admin accounts only."""
+    if not getattr(current_user, "is_admin", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin only")
+    return current_user
+
+
+APPLE_ISSUER = "https://appleid.apple.com"
+GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+
+
+def _check_audience(claims: dict, expected: str, provider: str) -> None:
+    """Enforce that a verified token was minted for *this* app.
+
+    ``expected`` is our configured OAuth client/bundle id(s) — a comma-separated
+    list, since a native app has a different Google client id per platform
+    (iOS/Android/Web) and any of them is legitimate. When it's unset (local dev,
+    no client id available) the check is skipped with a warning rather than
+    silently trusting any audience. Google's tokeninfo names the minting client
+    in ``aud``/``azp``; Apple's identity token uses ``aud``.
+    """
+    allowed = {a.strip() for a in expected.split(",") if a.strip()}
+    if not allowed:
+        log.warning(
+            "%s audience not verified — set the client id to enable this check", provider
+        )
+        return
+    presented = {claims.get("aud"), claims.get("azp")}
+    presented.discard(None)
+    if allowed.isdisjoint(presented):
+        raise ValueError(f"{provider} token was not issued for this app")
+
+
 def verify_apple_identity_token(identity_token: str) -> dict:
-    """Verify Apple identity token using Apple's JWKS. Returns decoded payload."""
+    """Verify an Apple identity token against Apple's JWKS.
+
+    Pins the algorithm to RS256 (never trusting the token's own header to name
+    it), verifies the issuer, and — when apple_client_id is configured — the
+    audience, so a token minted for a different Apple relying party is rejected.
+    """
     try:
         header = jwt.get_unverified_header(identity_token)
         kid = header.get("kid")
-        alg = header.get("alg", "RS256")
 
         resp = httpx.get(APPLE_JWKS_URL, timeout=10.0)
         resp.raise_for_status()
@@ -101,23 +141,36 @@ def verify_apple_identity_token(identity_token: str) -> dict:
         if not key:
             raise ValueError("No matching Apple public key found")
 
-        return jwt.decode(
+        claims = jwt.decode(
             identity_token,
             key,
-            algorithms=[alg],
-            options={"verify_aud": False},  # Audience is the bundle ID, varies per env
+            algorithms=["RS256"],  # pin — ignore the attacker-controllable header alg
+            issuer=APPLE_ISSUER,
+            options={"verify_aud": False, "verify_iss": True},
         )
     except JWTError as exc:
         raise ValueError(f"Invalid Apple token: {exc}") from exc
 
+    _check_audience(claims, settings.apple_client_id, "Apple")
+    return claims
+
 
 def fetch_google_user_info(access_token: str) -> dict:
-    """Fetch user profile from Google using an OAuth2 access token."""
+    """Resolve a Google OAuth2 access token to a verified profile.
+
+    Uses Google's tokeninfo endpoint (not userinfo) so the response includes the
+    ``aud``/``azp`` of the client that minted the token; we reject tokens that
+    weren't issued for this app. This closes the confused-deputy hole where any
+    valid Google access token (harvested by a third-party app) could be replayed
+    to log in as the victim.
+    """
     resp = httpx.get(
-        GOOGLE_USERINFO_URL,
-        headers={"Authorization": f"Bearer {access_token}"},
+        GOOGLE_TOKENINFO_URL,
+        params={"access_token": access_token},
         timeout=10.0,
     )
     if resp.status_code != 200:
         raise ValueError("Invalid Google access token")
-    return resp.json()
+    info = resp.json()
+    _check_audience(info, settings.google_client_id, "Google")
+    return info

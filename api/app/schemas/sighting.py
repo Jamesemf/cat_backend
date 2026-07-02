@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt
 
@@ -178,8 +178,8 @@ class SightingCommit(BaseModel):
     """
     cat_id: int | None = None
     photo_path: str
-    latitude: float
-    longitude: float
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
     spotter_name: str | None = None
     vibes: str | None = None
     is_cat: bool | None = None

@@ -89,7 +89,7 @@ def send_email(to: str, subject: str, html: str, text: str | None = None) -> boo
 
 def send_password_reset_code(to: str, code: str) -> bool:
     """Email a 6-digit password-reset code."""
-    subject = "Your Cats password reset code"
+    subject = f"Your {settings.email_brand_name} password reset code"
     inner = f"""\
       <h1 style="font-size:20px;font-weight:800;color:#2d2420;margin:0 0 8px;">Reset your password</h1>
       <p style="font-size:15px;line-height:22px;color:#9a8a82;margin:0 0 24px;">

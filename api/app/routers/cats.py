@@ -32,7 +32,7 @@ from app.schemas.cat import (
     TopCat,
 )
 from app.schemas.claim import INDOOR_OUTDOOR_VALUES
-from app.services.auth_service import get_current_user
+from app.services.auth_service import get_current_user, require_admin
 from app.services.claim_verification import MAX_CLAIM_ATTEMPTS_PER_DAY, MAX_PHOTOS
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
@@ -48,6 +48,7 @@ MAX_PHOTO_BYTES = 5 * 1024 * 1024
 
 @router.get("", response_model=list[CatOut])
 def list_cats(limit: int = 100, db: Session = Depends(get_db)):
+    limit = max(1, min(limit, 200))
     return db.query(Cat).order_by(Cat.last_seen.desc()).limit(limit).all()
 
 
@@ -78,7 +79,11 @@ def list_cats_nearby(limit: int = 100, photos: int = 8, db: Session = Depends(ge
 
 
 @router.post("", response_model=CatOut, status_code=201)
-def create_cat(body: CatCreate, db: Session = Depends(get_db)):
+def create_cat(
+    body: CatCreate,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
     now = datetime.now(timezone.utc)
     cat = Cat(name=body.name, breed=body.breed, first_seen=now, last_seen=now)
     db.add(cat)
@@ -212,7 +217,10 @@ async def register_cat(
 
 
 @router.post("/recompute-rarity", status_code=200)
-def recompute_all_rarity(db: Session = Depends(get_db)):
+def recompute_all_rarity(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
     """Recalculate rarity_score for every cat based on current sighting counts."""
     cats = db.query(Cat).all()
     for cat in cats:
@@ -226,7 +234,7 @@ def merge_cats(
     source_id: int,
     body: CatMergeRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
     """Merge a duplicate cat (the one in the path) into a target, then delete it.
 

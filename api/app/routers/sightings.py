@@ -225,7 +225,10 @@ def create_sighting(
         photo_path=body.photo_path,
         latitude=body.latitude,
         longitude=body.longitude,
-        spotter_name=body.spotter_name,
+        # Derive the public spotter label from the authenticated account's
+        # display name only — never the client-supplied value (spoofable) and
+        # never the email (which would leak the address on the public feed).
+        spotter_name=(current_user.display_name if current_user else None),
         breed_description=body.breed,
         vibes=body.vibes,
         is_cat=body.is_cat,
@@ -327,6 +330,8 @@ def get_feed(
     carries the interaction state of the Explorer post it was mirrored into, so
     the Neighbourhood feed can like/comment/report each spot.
     """
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
     query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))
 
     if lat is not None and lng is not None:
@@ -477,6 +482,8 @@ def update_polaroid(
 
 @router.get("", response_model=list[SightingOut])
 def list_sightings(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
     return (
         db.query(Sighting)
         .order_by(Sighting.spotted_at.desc())
@@ -487,17 +494,27 @@ def list_sightings(limit: int = 50, offset: int = 0, db: Session = Depends(get_d
 
 
 @router.patch("/{sighting_id}", response_model=SightingOut)
-def assign_cat(sighting_id: int, body: SightingAssign, db: Session = Depends(get_db)):
+def assign_cat(
+    sighting_id: int,
+    body: SightingAssign,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     sighting = db.query(Sighting).filter(Sighting.id == sighting_id).first()
     if not sighting:
         raise HTTPException(status_code=404, detail="Sighting not found")
+
+    # Only the user who logged the sighting may reassign which cat it belongs to.
+    if sighting.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your sighting")
 
     cat = db.query(Cat).filter(Cat.id == body.cat_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Cat not found")
 
     sighting.cat_id = cat.id
-    cat.sighting_count = db.query(Sighting).filter(Sighting.cat_id == cat.id).count() + 1
+    db.flush()  # so the row above is counted exactly once below
+    cat.sighting_count = db.query(Sighting).filter(Sighting.cat_id == cat.id).count()
     cat.last_seen = sighting.spotted_at
     cat.last_lat = sighting.latitude
     cat.last_lng = sighting.longitude

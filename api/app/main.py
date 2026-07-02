@@ -17,6 +17,25 @@ from app.utils.rarity import compute_rarity_score
 
 log = logging.getLogger(__name__)
 
+
+def _require_secure_config() -> None:
+    """Fail fast if a real (non-SQLite) deployment runs with an insecure secret.
+
+    A production database implies production traffic, so the JWT signing key must
+    not be the built-in default or a trivially short value — otherwise anyone can
+    forge tokens for any account. Local/dev (SQLite) and the test suite are
+    exempt so they keep working with the default.
+    """
+    if settings.database_url and not settings.database_url.startswith("sqlite"):
+        if settings.secret_key in ("", "change-me") or len(settings.secret_key) < 32:
+            raise RuntimeError(
+                "SECRET_KEY must be set to a strong (>=32 char) value when running "
+                "against a non-SQLite database. Refusing to start with an insecure key."
+            )
+
+
+_require_secure_config()
+
 Base.metadata.create_all(bind=engine)
 
 # Ad-hoc column migrations for pre-existing SQLite dev databases. create_all
@@ -59,6 +78,17 @@ with engine.connect() as _conn:
             _conn.commit()
         if "notify_new_cat_in_area" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN notify_new_cat_in_area BOOLEAN NOT NULL DEFAULT 1"))
+            _conn.commit()
+        if "is_admin" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+            _conn.commit()
+        _ev_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(email_verifications)")).fetchall()]
+        if _ev_cols and "attempts" not in _ev_cols:
+            _conn.execute(_text("ALTER TABLE email_verifications ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"))
+            _conn.commit()
+        _pr_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(password_resets)")).fetchall()]
+        if _pr_cols and "attempts" not in _pr_cols:
+            _conn.execute(_text("ALTER TABLE password_resets ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"))
             _conn.commit()
         _c_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(cat_claims)")).fetchall()]
         if _c_cols and "real_name" not in _c_cols:
@@ -109,6 +139,18 @@ with engine.connect() as _conn:
         _conn.commit()
         _conn.execute(_text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_new_cat_in_area BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE email_verifications ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
         ))
         _conn.commit()
     # Cat follows were removed (claiming a cat is the only per-cat notification
@@ -209,12 +251,16 @@ async def lifespan(app: FastAPI):
             pass
 
 
-app = FastAPI(title="Cats API", lifespan=lifespan)
+app = FastAPI(title="Meow Map API", lifespan=lifespan)
 
+_cors_origins = [o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Tighten to specific origins in production
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    # Auth is Bearer-token, not cookie-based, so credentials are never needed.
+    # Keeping this False is what makes a wildcard origin safe (the browser blocks
+    # "*" + credentials anyway) and avoids exposing the API to credentialed CSRF.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
