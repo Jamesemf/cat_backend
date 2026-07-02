@@ -54,6 +54,12 @@ with engine.connect() as _conn:
         if "catalog_layout" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN catalog_layout TEXT"))
             _conn.commit()
+        if "notify_nearby_sightings" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN notify_nearby_sightings BOOLEAN NOT NULL DEFAULT 1"))
+            _conn.commit()
+        if "notify_new_cat_in_area" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN notify_new_cat_in_area BOOLEAN NOT NULL DEFAULT 1"))
+            _conn.commit()
         _c_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(cat_claims)")).fetchall()]
         if _c_cols and "real_name" not in _c_cols:
             _conn.execute(_text("ALTER TABLE cat_claims ADD COLUMN real_name TEXT"))
@@ -97,6 +103,26 @@ with engine.connect() as _conn:
             "ALTER TABLE explored_tiles ADD COLUMN IF NOT EXISTS is_home BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_nearby_sightings BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_new_cat_in_area BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+        _conn.commit()
+    # Cat follows were removed (claiming a cat is the only per-cat notification
+    # subscription), so sweep the orphaned table off existing databases.
+    # Standard SQL, both dialects, idempotent.
+    _conn.execute(_text("DROP TABLE IF EXISTS cat_follows"))
+    _conn.commit()
+    # The tile_key index is declared on the model (fresh create_all builds it),
+    # but create_all won't add it to a pre-existing table. IF NOT EXISTS is
+    # supported by both SQLite and Postgres, so patch it in for both.
+    _conn.execute(_text(
+        "CREATE INDEX IF NOT EXISTS ix_explored_tiles_tile_key ON explored_tiles (tile_key)"
+    ))
+    _conn.commit()
     # Grandfather accounts that predate email verification so enforcing it
     # doesn't lock them out: a pre-feature user has no pending verification code
     # (the table didn't exist when they signed up), so mark them verified. New

@@ -36,3 +36,15 @@ class PushTokenIn(BaseModel):
 class MarkReadIn(BaseModel):
     ids: list[int] | None = None
     all: bool = False
+
+
+class NotificationPrefs(BaseModel):
+    nearby_sightings: bool
+    new_cat_in_area: bool
+
+
+class NotificationPrefsUpdate(BaseModel):
+    """Partial update — omitted fields are left unchanged."""
+
+    nearby_sightings: bool | None = None
+    new_cat_in_area: bool | None = None

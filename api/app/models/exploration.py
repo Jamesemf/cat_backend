@@ -27,8 +27,9 @@ class ExploredTile(Base):
     user_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("users.id"), nullable=False, index=True
     )
-    # Hex-grid key, "q,r" — the same key FogContext persists locally.
-    tile_key: Mapped[str] = mapped_column(String, nullable=False)
+    # Hex-grid key, "q,r" — the same key FogContext persists locally. Indexed so
+    # the nearby-sighting fan-out can find "who explored these tiles" quickly.
+    tile_key: Mapped[str] = mapped_column(String, nullable=False, index=True)
     # Set when the tile was unlocked by walking to a landmark; null for plain
     # tiles unlocked by reveal-bombs around an explored area.
     checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)

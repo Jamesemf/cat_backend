@@ -6,7 +6,14 @@ from sqlalchemy.orm import Session, joinedload
 from app.db.session import get_db
 from app.models.notification import Notification, PushToken
 from app.models.user import User
-from app.schemas.notification import MarkReadIn, NotificationOut, PushTokenIn, UnreadCount
+from app.schemas.notification import (
+    MarkReadIn,
+    NotificationOut,
+    NotificationPrefs,
+    NotificationPrefsUpdate,
+    PushTokenIn,
+    UnreadCount,
+)
 from app.services.auth_service import get_current_user
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
@@ -79,6 +86,31 @@ def mark_read(
     )
     db.commit()
     return {"updated": updated}
+
+
+@router.get("/preferences", response_model=NotificationPrefs)
+def get_preferences(current_user: User = Depends(get_current_user)):
+    return NotificationPrefs(
+        nearby_sightings=current_user.notify_nearby_sightings,
+        new_cat_in_area=current_user.notify_new_cat_in_area,
+    )
+
+
+@router.put("/preferences", response_model=NotificationPrefs)
+def update_preferences(
+    body: NotificationPrefsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if body.nearby_sightings is not None:
+        current_user.notify_nearby_sightings = body.nearby_sightings
+    if body.new_cat_in_area is not None:
+        current_user.notify_new_cat_in_area = body.new_cat_in_area
+    db.commit()
+    return NotificationPrefs(
+        nearby_sightings=current_user.notify_nearby_sightings,
+        new_cat_in_area=current_user.notify_new_cat_in_area,
+    )
 
 
 @router.post("/push-token", status_code=204)

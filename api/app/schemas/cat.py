@@ -116,8 +116,6 @@ class CatOut(CatBase):
 class CatWithSightings(CatOut):
     sightings: list[SightingOut] = []
     owner: OwnerCard | None = None
-    follower_count: int = 0
-    is_following: bool = False
 
 
 class TerritoryOut(BaseModel):

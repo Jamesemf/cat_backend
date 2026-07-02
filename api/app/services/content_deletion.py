@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.models.cat import Cat
 from app.models.claim import CatClaim, ClaimPhoto
 from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
-from app.models.follow import CatFollow
 from app.models.notification import Notification
 from app.models.sighting import Sighting
 from app.services.storage import UPLOADS_PREFIX, get_storage
@@ -40,7 +39,6 @@ def delete_cat(db: Session, cat: Cat) -> list[str]:
     """
     file_paths: list[str] = []
     db.query(Notification).filter(Notification.cat_id == cat.id).delete(synchronize_session=False)
-    db.query(CatFollow).filter(CatFollow.cat_id == cat.id).delete(synchronize_session=False)
     db.query(ExplorerPost).filter(ExplorerPost.cat_id == cat.id).update(
         {ExplorerPost.cat_id: None}, synchronize_session=False
     )

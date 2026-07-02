@@ -225,6 +225,19 @@ async def submit_claim(
                 cat_id=cat.id,
             )
         )
+    else:
+        # The result screen shows the rejection immediately; this row keeps a
+        # record in the inbox (with the reason) after that screen is dismissed.
+        db.add(
+            Notification(
+                user_id=current_user.id,
+                type="claim_rejected",
+                title=f"Claim on {cat.name or 'this cat'} wasn't verified",
+                body=decision.reason
+                or "Your photos didn't match this cat closely enough. You can try again later.",
+                cat_id=cat.id,
+            )
+        )
 
     try:
         db.commit()

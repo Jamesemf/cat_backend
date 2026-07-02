@@ -13,7 +13,8 @@ class Notification(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    # sighting | claim_verified | claim_rejected | meow | comment
+    # sighting | nearby_sighting | new_cat | claim_verified | claim_rejected |
+    # meow | comment
     type: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)

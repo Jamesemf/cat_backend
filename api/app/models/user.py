@@ -22,6 +22,11 @@ class User(Base):
     catalog_layout: Mapped[str | None] = mapped_column(Text, nullable=True)
     display_name_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Per-type notification opt-outs, controlled from Settings > Notifications.
+    # These gate the area-based fan-outs (services/sighting_notifications.py);
+    # owner/social notifications are opt-in by their own actions.
+    notify_nearby_sightings: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notify_new_cat_in_area: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Whether the email address has been confirmed via a verification code.
     # Email/password signups start False (a code is emailed on register);
     # Apple/Google signups are True since the provider already verified it.

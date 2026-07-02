@@ -397,13 +397,10 @@ def delete_me(
         {Sighting.user_id: None, Sighting.spotter_name: None}, synchronize_session=False
     )
 
-    # 3. Interactions, reports, and follows.
-    from app.models.follow import CatFollow
-
+    # 3. Interactions and reports.
     db.query(PostComment).filter(PostComment.user_id == uid).delete(synchronize_session=False)
     db.query(PostMeow).filter(PostMeow.user_id == uid).delete(synchronize_session=False)
     db.query(PostReport).filter(PostReport.reporter_id == uid).delete(synchronize_session=False)
-    db.query(CatFollow).filter(CatFollow.user_id == uid).delete(synchronize_session=False)
     db.query(ExploredTile).filter(ExploredTile.user_id == uid).delete(synchronize_session=False)
 
     # 4. Claims (all statuses) and their evidence photos. Verified claims

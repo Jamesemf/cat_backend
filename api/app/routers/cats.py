@@ -11,7 +11,6 @@ from app.models.cat import Cat
 from app.models.claim import CatClaim
 from app.models.explorer import ExplorerPost
 from app.models.exploration import ExploredTile
-from app.models.follow import CatFollow
 from app.models.notification import Notification
 from app.models.sighting import Sighting
 from app.models.user import User
@@ -33,7 +32,7 @@ from app.schemas.cat import (
     TopCat,
 )
 from app.schemas.claim import INDOOR_OUTDOOR_VALUES
-from app.services.auth_service import get_current_user, get_optional_user
+from app.services.auth_service import get_current_user
 from app.services.claim_verification import MAX_CLAIM_ATTEMPTS_PER_DAY, MAX_PHOTOS
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
@@ -196,6 +195,17 @@ async def register_cat(
             decided_at=now,
         )
     )
+    # Same inbox record the claim flow leaves — registering makes you the
+    # verified owner directly.
+    db.add(
+        Notification(
+            user_id=current_user.id,
+            type="claim_verified",
+            title=f"You're now {cat.name}'s verified owner",
+            body="You'll be notified whenever they're spotted.",
+            cat_id=cat.id,
+        )
+    )
     db.commit()
     db.refresh(cat)
     return cat
@@ -221,8 +231,8 @@ def merge_cats(
     """Merge a duplicate cat (the one in the path) into a target, then delete it.
 
     When a missed Re-ID match creates a second cat for the same animal, this
-    folds the duplicate back in: every sighting, Explorer post, follow, claim
-    and notification moves to the target, the target's aggregates are recomputed,
+    folds the duplicate back in: every sighting, Explorer post, claim and
+    notification moves to the target, the target's aggregates are recomputed,
     and the source cat is removed. Requires a signed-in user; this is a
     maintenance action that should be restricted to admins before production.
     """
@@ -264,17 +274,6 @@ def merge_cats(
     db.query(Notification).filter(Notification.cat_id == source_id).update(
         {Notification.cat_id: target_id}, synchronize_session=False
     )
-
-    # Follows: drop any source follow by a user who already follows the target so
-    # the (cat_id, user_id) unique constraint isn't violated; move the rest.
-    target_follower_ids = {
-        row[0] for row in db.query(CatFollow.user_id).filter(CatFollow.cat_id == target_id).all()
-    }
-    for follow in db.query(CatFollow).filter(CatFollow.cat_id == source_id).all():
-        if follow.user_id in target_follower_ids:
-            db.delete(follow)
-        else:
-            follow.cat_id = target_id
 
     # At most one side is verified (checked above), so reassigning claims is safe.
     db.query(CatClaim).filter(CatClaim.cat_id == source_id).update(
@@ -438,18 +437,10 @@ def get_territory(cat_id: int, db: Session = Depends(get_db)):
 def get_cat(
     cat_id: int,
     db: Session = Depends(get_db),
-    current_user: User | None = Depends(get_optional_user),
 ):
     cat = db.query(Cat).filter(Cat.id == cat_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Cat not found")
     out = CatWithSightings.model_validate(cat)
     out.owner = owner_card_for_cat(db, cat_id)
-    out.follower_count = db.query(CatFollow).filter(CatFollow.cat_id == cat_id).count()
-    out.is_following = bool(
-        current_user
-        and db.query(CatFollow.id)
-        .filter(CatFollow.cat_id == cat_id, CatFollow.user_id == current_user.id)
-        .first()
-    )
     return out

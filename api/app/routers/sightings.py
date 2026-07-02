@@ -31,6 +31,7 @@ from sqlalchemy.orm import joinedload
 from app.models.user import User
 from app.services.auth_service import get_current_user, get_optional_user
 from app.services.push import push_to_user
+from app.services.sighting_notifications import notify_sighting_audiences
 from app.services.storage import UPLOADS_PREFIX, get_storage
 from app.utils.matching import find_match_candidates, haversine_km
 from app.utils.rarity import compute_rarity_score
@@ -260,15 +261,16 @@ def create_sighting(
     # Notify the verified owner (if any) that their cat was spotted. The
     # notification row is written in its own transaction so it is never lost;
     # the push goes via a background task so the response isn't delayed.
+    submitter_id = current_user.id if current_user else None
+    owner_id = None
     if body.cat_id is not None:
-        submitter_id = current_user.id if current_user else None
-
         claim = (
             db.query(CatClaim)
             .filter(CatClaim.cat_id == cat.id, CatClaim.status == "verified")
             .first()
         )
         if claim and claim.user_id != submitter_id:
+            owner_id = claim.user_id
             title = f"{cat.name or 'Your cat'} was spotted!"
             notif_body = (
                 f"Someone just logged a sighting of {cat.name or 'your cat'}. Tap to see where."
@@ -291,6 +293,19 @@ def create_sighting(
                 notif_body,
                 {"cat_id": cat.id, "sighting_id": sighting.id},
             )
+
+    # Fan out to explorers of nearby tiles. The submitter and the owner
+    # (already notified above) are excluded.
+    background_tasks.add_task(
+        notify_sighting_audiences,
+        sighting.id,
+        cat.id,
+        cat.name,
+        sighting.latitude,
+        sighting.longitude,
+        body.cat_id is None,
+        {uid for uid in (submitter_id, owner_id) if uid is not None},
+    )
 
     return sighting
 
