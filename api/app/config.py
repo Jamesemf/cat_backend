@@ -14,7 +14,9 @@ class Settings(BaseSettings):
     # OAuth client IDs. When set, Apple/Google sign-in verifies the token's
     # audience against these — rejecting tokens minted for a different app
     # (prevents token-substitution account takeover). Left blank in local dev,
-    # where audience verification is skipped with a warning.
+    # where audience verification is skipped with a warning. google_client_id
+    # accepts a comma-separated list (a native app has one client id per
+    # platform: iOS, Android, and optionally Web).
     google_client_id: str = ""
     apple_client_id: str = ""
     s3_bucket: str = ""

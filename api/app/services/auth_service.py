@@ -103,18 +103,22 @@ GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 def _check_audience(claims: dict, expected: str, provider: str) -> None:
     """Enforce that a verified token was minted for *this* app.
 
-    ``expected`` is our configured OAuth client/bundle id. When it's unset
-    (local dev, no client id available) the check is skipped with a warning
-    rather than silently trusting any audience. Google's tokeninfo names the
-    minting client in ``aud``/``azp``; Apple's identity token uses ``aud``.
+    ``expected`` is our configured OAuth client/bundle id(s) — a comma-separated
+    list, since a native app has a different Google client id per platform
+    (iOS/Android/Web) and any of them is legitimate. When it's unset (local dev,
+    no client id available) the check is skipped with a warning rather than
+    silently trusting any audience. Google's tokeninfo names the minting client
+    in ``aud``/``azp``; Apple's identity token uses ``aud``.
     """
-    if not expected:
+    allowed = {a.strip() for a in expected.split(",") if a.strip()}
+    if not allowed:
         log.warning(
             "%s audience not verified — set the client id to enable this check", provider
         )
         return
     presented = {claims.get("aud"), claims.get("azp")}
-    if expected not in presented:
+    presented.discard(None)
+    if allowed.isdisjoint(presented):
         raise ValueError(f"{provider} token was not issued for this app")
 
 

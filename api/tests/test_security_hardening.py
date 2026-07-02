@@ -68,6 +68,17 @@ def test_check_audience_skipped_when_unconfigured():
     _check_audience({"aud": "anything"}, "", "Apple")
 
 
+def test_check_audience_accepts_any_of_comma_separated_ids():
+    # A native app has one Google client id per platform; a token from either
+    # (here the Android one) must pass when both are configured.
+    _check_audience({"aud": "android-id"}, "ios-id, android-id", "Google")
+
+
+def test_check_audience_rejects_when_not_in_list():
+    with pytest.raises(ValueError):
+        _check_audience({"aud": "web-id"}, "ios-id, android-id", "Google")
+
+
 # --- shared client fixture --------------------------------------------------
 
 @pytest.fixture
