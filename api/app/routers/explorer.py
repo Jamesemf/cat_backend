@@ -368,11 +368,13 @@ def toggle_meow(
                     title=title,
                     body=notif_body,
                     post_id=post.id,
+                    # The standalone post screen is gone — taps land on the cat.
+                    cat_id=post.cat_id,
                 )
             )
             db.commit()
             background_tasks.add_task(
-                push_to_user, post.user_id, title, notif_body, {"post_id": post.id}
+                push_to_user, post.user_id, title, notif_body, {"cat_id": post.cat_id}
             )
 
     meow_count = db.query(PostMeow).filter(PostMeow.post_id == post_id).count()
@@ -464,11 +466,13 @@ def create_comment(
                 title=title,
                 body=notif_body,
                 post_id=post.id,
+                # The standalone post screen is gone — taps land on the cat.
+                cat_id=post.cat_id,
             )
         )
         db.commit()
         background_tasks.add_task(
-            push_to_user, post.user_id, title, notif_body, {"post_id": post.id}
+            push_to_user, post.user_id, title, notif_body, {"cat_id": post.cat_id}
         )
 
     return CommentOut(
