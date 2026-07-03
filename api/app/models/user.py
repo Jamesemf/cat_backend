@@ -35,6 +35,13 @@ class User(Base):
     # recompute rarity, create bare cat rows). Off for everyone by default; set
     # directly in the DB for trusted operators.
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Content moderation: strikes accrue when vision flags a submitted photo as
+    # harmful (services/moderation.py). Strikes 1-2 are warnings; the third
+    # sets banned_at, which locks the account out of every authenticated
+    # endpoint. Unban by clearing banned_at (and usually content_strikes) in
+    # the DB — there's no self-service appeal flow.
+    content_strikes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    banned_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )

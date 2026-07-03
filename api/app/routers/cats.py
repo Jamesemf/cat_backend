@@ -34,6 +34,7 @@ from app.schemas.cat import (
 from app.schemas.claim import INDOOR_OUTDOOR_VALUES
 from app.services.auth_service import get_current_user, require_admin
 from app.services.claim_verification import MAX_CLAIM_ATTEMPTS_PER_DAY, MAX_PHOTOS
+from app.services.moderation import register_content_strike
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
 from app.utils.rarity import compute_rarity_score
@@ -153,6 +154,11 @@ async def register_cat(
             status_code=503,
             detail="Cat recognition is temporarily unavailable. Please try again.",
         )
+
+    # Harmful content earns a strike (two warnings, banned on the third).
+    if not features.is_appropriate:
+        detail = register_content_strike(db, current_user, features.inappropriate_reason)
+        raise HTTPException(status_code=400, detail=detail)
 
     if not features.is_cat:
         raise HTTPException(

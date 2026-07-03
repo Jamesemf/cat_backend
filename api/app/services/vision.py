@@ -22,10 +22,8 @@ from app.config import settings
 # Image tokens ≈ (width × height) / 750, and the API auto-downscales anything
 # over ~1.15 MP — so oversized uploads just pay the ~1,600-token ceiling.
 # Feature analysis (coat colour/pattern/fur length from closed enums) works at
-# ~1092px on the long edge (~1,100-1,200 tokens); moderation ("is this a cat,
-# is it appropriate") needs even less detail, so it goes smaller still.
+# ~1092px on the long edge (~1,100-1,200 tokens).
 ANALYSIS_MAX_DIMENSION = 1092
-MODERATION_MAX_DIMENSION = 768
 JPEG_QUALITY = 85
 
 log = logging.getLogger(__name__)
@@ -78,6 +76,18 @@ CAT_BREEDS = [
     "Mixed Cat",
 ]
 
+# Harm categories that count as content strikes against the submitting account
+# (see services/moderation.py). Deliberately excludes benign misses like "not a
+# cat" or blurry photos — only content that shouldn't be pointed at a camera.
+INAPPROPRIATE_REASONS = [
+    "animal_harm",
+    "violence_or_gore",
+    "nsfw",
+    "hate_or_harassment",
+    "private_information",
+    "other_inappropriate",
+]
+
 REPORT_CAT_TOOL: dict[str, Any] = {
     "name": "report_cat",
     "description": (
@@ -90,6 +100,21 @@ REPORT_CAT_TOOL: dict[str, Any] = {
             "is_cat": {
                 "type": "boolean",
                 "description": "True if at least one cat is clearly visible.",
+            },
+            "is_appropriate": {
+                "type": "boolean",
+                "description": (
+                    "False if the photo contains content unsuitable for a general-audience "
+                    "community app: violence, gore, animal cruelty or distress, nudity or "
+                    "sexual content, hate symbols, identifiable private documents, or shock "
+                    "content. A photo that merely lacks a cat is still appropriate unless "
+                    "it contains such content."
+                ),
+            },
+            "inappropriate_reason": {
+                "type": ["string", "null"],
+                "enum": [*INAPPROPRIATE_REASONS, None],
+                "description": "Single best category when is_appropriate is false; null otherwise.",
             },
             "cat_count": {
                 "type": "integer",
@@ -146,7 +171,7 @@ REPORT_CAT_TOOL: dict[str, Any] = {
                 ),
             },
         },
-        "required": ["is_cat", "cat_count"],
+        "required": ["is_cat", "cat_count", "is_appropriate"],
     },
 }
 
@@ -154,6 +179,10 @@ SYSTEM_PROMPT = (
     "You are a cat re-identification assistant. "
     "Analyze the photo and call the `report_cat` tool exactly once. "
     "If no cat is clearly visible set is_cat=false and leave feature fields null. "
+    "Also screen the photo for harmful content: set is_appropriate=false with an "
+    "inappropriate_reason for violence, gore, animal cruelty, nudity or sexual "
+    "content, hate symbols, private documents, or shock content. Ordinary photos "
+    "that merely lack a cat are still appropriate. "
     "Be conservative: when a feature is ambiguous, return null or 'unknown' rather than guessing."
 )
 
@@ -163,80 +192,14 @@ USER_PROMPT = (
 )
 
 
-REJECTION_REASONS = [
-    "not_a_cat",
-    "animal_harm",
-    "violence_or_gore",
-    "nsfw",
-    "hate_or_harassment",
-    "private_information",
-    "other_inappropriate",
-]
-
-REVIEW_POST_TOOL: dict[str, Any] = {
-    "name": "review_post",
-    "description": "Moderate a photo submitted to a public cat-photo feed.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "is_cat": {
-                "type": "boolean",
-                "description": "True if at least one real cat is clearly the subject of the photo.",
-            },
-            "is_appropriate": {
-                "type": "boolean",
-                "description": (
-                    "False if the photo contains content unsuitable for a general-audience "
-                    "community feed: violence, gore, animal cruelty or distress, nudity or "
-                    "sexual content, hate symbols, identifiable private documents, or shock content."
-                ),
-            },
-            "rejection_reason": {
-                "type": ["string", "null"],
-                "enum": [*REJECTION_REASONS, None],
-                "description": "Single best reason when rejecting; null when the photo is acceptable.",
-            },
-            "reason_detail": {
-                "type": ["string", "null"],
-                "description": (
-                    "One short, friendly sentence suitable to show the uploader explaining "
-                    "the rejection. Null when the photo is acceptable."
-                ),
-            },
-        },
-        "required": ["is_cat", "is_appropriate"],
-    },
-}
-
-MODERATION_SYSTEM = (
-    "You are a content moderator for a friendly neighborhood cat-spotting app. "
-    "Review the photo and call the `review_post` tool exactly once. "
-    "Accept photos where a real cat is the clear subject. Reject photos with no cat "
-    "(dogs, memes, screenshots, drawings, unrelated scenes) and photos containing harmful "
-    "or inappropriate content of any kind. Be strict about harm, lenient about photo quality."
-)
-
-MODERATION_USER_PROMPT = (
-    "Review this photo for the public cat feed and report your decision via the review_post tool."
-)
-
-
-@dataclass
-class ModerationResult:
-    is_cat: bool
-    is_appropriate: bool
-    rejection_reason: str | None = None
-    reason_detail: str | None = None
-
-    @property
-    def accepted(self) -> bool:
-        return self.is_cat and self.is_appropriate
-
-
 @dataclass
 class CatFeatures:
     is_cat: bool
     cat_count: int
+    # Content screening: False means the photo contains harmful content and the
+    # submitting account should receive a content strike (services/moderation.py).
+    is_appropriate: bool = True
+    inappropriate_reason: str | None = None
     not_cat_reason: str | None = None
     primary_color: str | None = None
     secondary_color: str | None = None
@@ -376,6 +339,10 @@ async def analyze_cat_photo(image_bytes: bytes) -> CatFeatures:
                 return CatFeatures(
                     is_cat=bool(payload["is_cat"]),
                     cat_count=int(payload["cat_count"]),
+                    # Fail open if the model omits the flag — a schema hiccup
+                    # must not hand out strikes.
+                    is_appropriate=bool(payload.get("is_appropriate", True)),
+                    inappropriate_reason=payload.get("inappropriate_reason"),
                     not_cat_reason=payload.get("not_cat_reason"),
                     primary_color=payload.get("primary_color"),
                     secondary_color=payload.get("secondary_color"),
@@ -390,66 +357,3 @@ async def analyze_cat_photo(image_bytes: bytes) -> CatFeatures:
 
     raise VisionError("Model did not return a report_cat tool_use block")
 
-
-async def moderate_explorer_photo(image_bytes: bytes) -> ModerationResult:
-    """Moderate a direct Explorer upload: must contain a cat and no harmful content.
-
-    Raises VisionError on API failure or malformed tool output — callers should
-    fail closed (reject the upload) in that case.
-    """
-    if not settings.anthropic_api_key:
-        raise VisionError("ANTHROPIC_API_KEY is not configured")
-
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    api_image = _prepare_image_for_api(image_bytes, MODERATION_MAX_DIMENSION)
-    image_b64 = base64.standard_b64encode(api_image).decode("ascii")
-
-    try:
-        response = await client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=256,
-            temperature=0,
-            # cache_control here is a no-op for now — see the note in
-            # analyze_cat_photo (prefix below the model's cacheable minimum).
-            system=[{
-                "type": "text",
-                "text": MODERATION_SYSTEM,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            tools=[{**REVIEW_POST_TOOL, "cache_control": {"type": "ephemeral"}}],
-            tool_choice={"type": "tool", "name": "review_post"},
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": image_b64,
-                            },
-                        },
-                        {"type": "text", "text": MODERATION_USER_PROMPT},
-                    ],
-                }
-            ],
-        )
-    except anthropic.APIError as exc:
-        log.exception("Anthropic moderation call failed")
-        raise VisionError(f"Anthropic API error: {exc}") from exc
-
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "review_post":
-            payload = block.input
-            try:
-                return ModerationResult(
-                    is_cat=bool(payload["is_cat"]),
-                    is_appropriate=bool(payload["is_appropriate"]),
-                    rejection_reason=payload.get("rejection_reason"),
-                    reason_detail=payload.get("reason_detail"),
-                )
-            except (KeyError, TypeError, ValueError) as exc:
-                raise VisionError(f"Malformed tool_use payload: {payload!r}") from exc
-
-    raise VisionError("Model did not return a review_post tool_use block")

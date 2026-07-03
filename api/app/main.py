@@ -82,6 +82,12 @@ with engine.connect() as _conn:
         if "is_admin" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
             _conn.commit()
+        if "content_strikes" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN content_strikes INTEGER NOT NULL DEFAULT 0"))
+            _conn.commit()
+        if "banned_at" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN banned_at DATETIME"))
+            _conn.commit()
         _ev_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(email_verifications)")).fetchall()]
         if _ev_cols and "attempts" not in _ev_cols:
             _conn.execute(_text("ALTER TABLE email_verifications ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"))
@@ -115,6 +121,14 @@ with engine.connect() as _conn:
         _conn.commit()
         _conn.execute(_text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS catalog_layout TEXT"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS content_strikes INTEGER NOT NULL DEFAULT 0"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_at TIMESTAMP"
         ))
         _conn.commit()
         _conn.execute(_text(

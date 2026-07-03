@@ -1,15 +1,6 @@
 import logging
-from pathlib import Path
 
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    File,
-    Form,
-    HTTPException,
-    UploadFile,
-)
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
@@ -35,31 +26,14 @@ from app.services.content_deletion import (
     safe_unlink,
 )
 from app.services.push import push_to_user
-from app.services.rate_limit import enforce_daily_limit
-from app.services.storage import get_storage
-from app.services.vision import VisionError, moderate_explorer_photo
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/explorer", tags=["explorer"])
 
-# Same abuse protection as sightings: per-user daily cap backed by the
-# daily_usage table (survives restarts, holds across instances). Counted per
-# upload attempt — moderation rejections still draw down the allowance, since
-# each attempt spends a Claude vision call.
-MAX_PHOTO_BYTES = 5 * 1024 * 1024
-MAX_POSTS_PER_DAY = 10
-
-# Friendly fallbacks when the model rejects without a displayable sentence.
-REJECTION_MESSAGES = {
-    "not_a_cat": "We couldn't spot a cat in this photo. The Explorer is cats only!",
-    "animal_harm": "This photo appears to show an animal in distress and can't be posted.",
-    "violence_or_gore": "This photo contains violent content and can't be posted.",
-    "nsfw": "This photo contains adult content and can't be posted.",
-    "hate_or_harassment": "This photo contains hateful content and can't be posted.",
-    "private_information": "This photo appears to contain private information and can't be posted.",
-    "other_inappropriate": "This photo isn't suitable for the Explorer feed.",
-}
+# Direct photo uploads to the Explorer feed were removed — posts are only
+# created by mirroring camera sightings (see routers/sightings.py). This
+# router just serves the feed and its interactions (meows/comments/reports).
 
 
 def _serialize_posts(
@@ -172,73 +146,6 @@ def get_post(
     post = _post_query(db).filter(ExplorerPost.id == post_id).first()
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
-    return _serialize_posts(db, [post], current_user)[0]
-
-
-@router.post("/posts", response_model=ExplorerPostOut, status_code=201)
-async def create_post(
-    photo: UploadFile = File(...),
-    caption: str | None = Form(None),
-    latitude: float | None = Form(None),
-    longitude: float | None = Form(None),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Upload a photo directly to the Explorer feed.
-
-    Location is optional — posts without coordinates simply never appear on
-    the map. Every upload is moderated by Claude vision before it is saved:
-    the photo must contain a cat and must not contain harmful content. Posts
-    are not tagged to a cat profile; this flow is just for sharing photos.
-    """
-    enforce_daily_limit(
-        db,
-        f"explorer:user:{current_user.id}",
-        MAX_POSTS_PER_DAY,
-        f"Daily limit of {MAX_POSTS_PER_DAY} Explorer posts reached. Come back tomorrow!",
-    )
-
-    contents = await photo.read()
-    if len(contents) > MAX_PHOTO_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Photo exceeds {MAX_PHOTO_BYTES // 1024 // 1024}MB limit.",
-        )
-
-    if caption is not None:
-        caption = caption.strip() or None
-    if caption and len(caption) > 280:
-        raise HTTPException(status_code=400, detail="Caption must be 280 characters or fewer.")
-
-    try:
-        verdict = await moderate_explorer_photo(contents)
-    except VisionError as exc:
-        log.warning("Explorer moderation failed: %s", exc)
-        raise HTTPException(
-            status_code=503,
-            detail="Photo checks are temporarily unavailable. Please try again.",
-        )
-
-    if not verdict.accepted:
-        reason = verdict.rejection_reason or ("not_a_cat" if not verdict.is_cat else "other_inappropriate")
-        detail = verdict.reason_detail or REJECTION_MESSAGES.get(
-            reason, REJECTION_MESSAGES["other_inappropriate"]
-        )
-        raise HTTPException(status_code=400, detail=detail)
-
-    ext = Path(photo.filename).suffix if photo.filename else ".jpg"
-    photo_path = get_storage().put(contents, ext=ext)
-
-    post = ExplorerPost(
-        user_id=current_user.id,
-        photo_path=photo_path,
-        caption=caption,
-        latitude=latitude,
-        longitude=longitude,
-    )
-    db.add(post)
-    db.commit()
-    db.refresh(post)
     return _serialize_posts(db, [post], current_user)[0]
 
 

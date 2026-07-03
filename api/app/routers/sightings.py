@@ -30,6 +30,7 @@ from sqlalchemy.orm import joinedload
 
 from app.models.user import User
 from app.services.auth_service import get_current_user, get_optional_user
+from app.services.moderation import register_content_strike
 from app.services.push import push_to_user
 from app.services.rate_limit import enforce_daily_limit
 from app.services.sighting_notifications import notify_sighting_audiences
@@ -99,6 +100,17 @@ async def analyze_photo(
             status_code=503,
             detail="Cat recognition is temporarily unavailable. Please try again.",
         )
+
+    # Harmful content: never store the photo, and strike the account (two
+    # warnings, banned on the third). Anonymous callers just get the rejection
+    # — there's no account to strike.
+    if not features.is_appropriate:
+        storage.delete(photo_path)
+        if current_user:
+            detail = register_content_strike(db, current_user, features.inappropriate_reason)
+        else:
+            detail = "This photo contains content that isn't allowed."
+        raise HTTPException(status_code=400, detail=detail)
 
     if features.cat_count > 1:
         storage.delete(photo_path)

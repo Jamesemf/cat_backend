@@ -63,7 +63,9 @@ def get_optional_user(
     if not user_id:
         return None
     user = db.get(User, int(user_id))
-    return user if user and user.is_active else None
+    if not user or not user.is_active or user.banned_at is not None:
+        return None
+    return user
 
 
 def get_current_user(
@@ -79,6 +81,11 @@ def get_current_user(
     user = db.get(User, int(user_id))
     if not user or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    # Banned accounts (repeated harmful-content strikes) are locked out of
+    # every authenticated endpoint. 403 with a stable code so the app can
+    # distinguish it from other auth failures.
+    if user.banned_at is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="account_banned")
     # Hard email-verification gate: an unverified account can authenticate but
     # cannot use any protected endpoint until it confirms its email. The app
     # routes this 403 to the verification screen. /auth/verify-email and

@@ -29,6 +29,7 @@ from app.services.claim_verification import (
     analyze_claim_photos,
     decide_claim,
 )
+from app.services.moderation import register_content_strike
 from app.services.storage import UPLOADS_PREFIX, get_storage
 from app.services.vision import VisionError
 
@@ -174,6 +175,16 @@ async def submit_claim(
             status_code=503,
             detail="Cat recognition is temporarily unavailable. Please try again.",
         )
+
+    # Harmful content in any photo: discard the whole batch and strike the
+    # account (two warnings, banned on the third). One strike per submission,
+    # not per photo.
+    flagged = next((f for f in photo_features if not f.is_appropriate), None)
+    if flagged is not None:
+        for p in saved_paths:
+            storage.delete(p)
+        detail = register_content_strike(db, current_user, flagged.inappropriate_reason)
+        raise HTTPException(status_code=400, detail=detail)
 
     decision = decide_claim(photo_features, cat)
 
