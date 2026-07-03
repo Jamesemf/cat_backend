@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     storage_reconcile_interval_hours: int = 6
     storage_orphan_grace_hours: int = 24
     anthropic_api_key: str = ""
-    anthropic_model: str = "claude-sonnet-4-6"
+    anthropic_model: str = "claude-haiku-4-5"
     # Transactional email (Resend). When resend_api_key is empty, email sending
     # is skipped and the reset code is logged instead (local dev). email_from
     # must be an address on a domain verified in Resend.

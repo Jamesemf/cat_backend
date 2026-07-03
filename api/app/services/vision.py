@@ -19,10 +19,13 @@ from PIL import Image, UnidentifiedImageError
 
 from app.config import settings
 
-# Anthropic recommends ~1.15 MP (≈1092px) for image input. We sit slightly above
-# that to keep a margin of detail useful for distinguishing_marks while staying
-# below the threshold where they auto-downscale server-side.
-MAX_IMAGE_DIMENSION = 1568
+# Image tokens ≈ (width × height) / 750, and the API auto-downscales anything
+# over ~1.15 MP — so oversized uploads just pay the ~1,600-token ceiling.
+# Feature analysis (coat colour/pattern/fur length from closed enums) works at
+# ~1092px on the long edge (~1,100-1,200 tokens); moderation ("is this a cat,
+# is it appropriate") needs even less detail, so it goes smaller still.
+ANALYSIS_MAX_DIMENSION = 1092
+MODERATION_MAX_DIMENSION = 768
 JPEG_QUALITY = 85
 
 log = logging.getLogger(__name__)
@@ -290,11 +293,11 @@ def generate_cat_nickname(
     return None
 
 
-def _prepare_image_for_api(image_bytes: bytes) -> bytes:
+def _prepare_image_for_api(image_bytes: bytes, max_dimension: int) -> bytes:
     """Shrink and re-encode image as JPEG for the Anthropic call.
 
     The on-disk original is left untouched; only this in-memory copy is sent
-    to the API. Longest side is capped at MAX_IMAGE_DIMENSION; aspect ratio
+    to the API. Longest side is capped at max_dimension; aspect ratio
     is preserved (no cropping — keeps the cat in frame regardless of how the
     user composed the shot).
     """
@@ -303,8 +306,8 @@ def _prepare_image_for_api(image_bytes: bytes) -> bytes:
             if img.mode != "RGB":
                 img = img.convert("RGB")
             longest = max(img.width, img.height)
-            if longest > MAX_IMAGE_DIMENSION:
-                scale = MAX_IMAGE_DIMENSION / longest
+            if longest > max_dimension:
+                scale = max_dimension / longest
                 new_size = (round(img.width * scale), round(img.height * scale))
                 img = img.resize(new_size, Image.Resampling.LANCZOS)
             buf = io.BytesIO()
@@ -323,7 +326,7 @@ async def analyze_cat_photo(image_bytes: bytes) -> CatFeatures:
         raise VisionError("ANTHROPIC_API_KEY is not configured")
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    api_image = _prepare_image_for_api(image_bytes)
+    api_image = _prepare_image_for_api(image_bytes, ANALYSIS_MAX_DIMENSION)
     media_type = "image/jpeg"
     image_b64 = base64.standard_b64encode(api_image).decode("ascii")
 
@@ -332,10 +335,12 @@ async def analyze_cat_photo(image_bytes: bytes) -> CatFeatures:
             model=settings.anthropic_model,
             max_tokens=512,
             temperature=0,
-            # Cache the static prefix (system prompt + tool schema). Subsequent
-            # calls within the 5-minute TTL pay ~10% of the input price for the
-            # cached portion. Anthropic charges only the per-call image and
-            # output tokens at full rate — saves ~25% per photo at MVP scale.
+            # NOTE: these cache_control markers are currently a no-op — the
+            # static prefix (system prompt + tool schema) is well under the
+            # model's minimum cacheable prefix (4096 tokens on Haiku 4.5), so
+            # nothing is written to the cache. Harmless to keep; they'd start
+            # working if the prefix ever grows past the minimum. The per-call
+            # image is never cacheable either way.
             system=[{
                 "type": "text",
                 "text": SYSTEM_PROMPT,
@@ -396,7 +401,7 @@ async def moderate_explorer_photo(image_bytes: bytes) -> ModerationResult:
         raise VisionError("ANTHROPIC_API_KEY is not configured")
 
     client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    api_image = _prepare_image_for_api(image_bytes)
+    api_image = _prepare_image_for_api(image_bytes, MODERATION_MAX_DIMENSION)
     image_b64 = base64.standard_b64encode(api_image).decode("ascii")
 
     try:
@@ -404,8 +409,8 @@ async def moderate_explorer_photo(image_bytes: bytes) -> ModerationResult:
             model=settings.anthropic_model,
             max_tokens=256,
             temperature=0,
-            # Static prefix (system + tool) is byte-stable so prompt caching applies,
-            # same as analyze_cat_photo.
+            # cache_control here is a no-op for now — see the note in
+            # analyze_cat_photo (prefix below the model's cacheable minimum).
             system=[{
                 "type": "text",
                 "text": MODERATION_SYSTEM,

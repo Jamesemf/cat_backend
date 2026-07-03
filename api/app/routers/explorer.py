@@ -1,5 +1,4 @@
 import logging
-from datetime import date
 from pathlib import Path
 
 from fastapi import (
@@ -9,7 +8,6 @@ from fastapi import (
     File,
     Form,
     HTTPException,
-    Request,
     UploadFile,
 )
 from sqlalchemy import func, or_
@@ -37,6 +35,7 @@ from app.services.content_deletion import (
     safe_unlink,
 )
 from app.services.push import push_to_user
+from app.services.rate_limit import enforce_daily_limit
 from app.services.storage import get_storage
 from app.services.vision import VisionError, moderate_explorer_photo
 
@@ -44,10 +43,12 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/explorer", tags=["explorer"])
 
-# Same in-memory abuse protection as sightings: resets on restart, single-process only.
+# Same abuse protection as sightings: per-user daily cap backed by the
+# daily_usage table (survives restarts, holds across instances). Counted per
+# upload attempt — moderation rejections still draw down the allowance, since
+# each attempt spends a Claude vision call.
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
-MAX_POSTS_PER_IP_PER_DAY = 50
-_rate_limit_buckets: dict[str, tuple[str, int]] = {}
+MAX_POSTS_PER_DAY = 10
 
 # Friendly fallbacks when the model rejects without a displayable sentence.
 REJECTION_MESSAGES = {
@@ -59,19 +60,6 @@ REJECTION_MESSAGES = {
     "private_information": "This photo appears to contain private information and can't be posted.",
     "other_inappropriate": "This photo isn't suitable for the Explorer feed.",
 }
-
-
-def _enforce_rate_limit(client_ip: str) -> None:
-    today = date.today().isoformat()
-    bucket_date, count = _rate_limit_buckets.get(client_ip, (today, 0))
-    if bucket_date != today:
-        count = 0
-    if count >= MAX_POSTS_PER_IP_PER_DAY:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Daily limit of {MAX_POSTS_PER_IP_PER_DAY} posts reached for this client.",
-        )
-    _rate_limit_buckets[client_ip] = (today, count + 1)
 
 
 def _serialize_posts(
@@ -189,7 +177,6 @@ def get_post(
 
 @router.post("/posts", response_model=ExplorerPostOut, status_code=201)
 async def create_post(
-    request: Request,
     photo: UploadFile = File(...),
     caption: str | None = Form(None),
     latitude: float | None = Form(None),
@@ -204,8 +191,12 @@ async def create_post(
     the photo must contain a cat and must not contain harmful content. Posts
     are not tagged to a cat profile; this flow is just for sharing photos.
     """
-    client_ip = request.client.host if request.client else "unknown"
-    _enforce_rate_limit(client_ip)
+    enforce_daily_limit(
+        db,
+        f"explorer:user:{current_user.id}",
+        MAX_POSTS_PER_DAY,
+        f"Daily limit of {MAX_POSTS_PER_DAY} Explorer posts reached. Come back tomorrow!",
+    )
 
     contents = await photo.read()
     if len(contents) > MAX_PHOTO_BYTES:

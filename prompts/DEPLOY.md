@@ -104,7 +104,7 @@ reads them case-insensitively).
 | `STORAGE_RECONCILE_INTERVAL_HOURS` | `6` | |
 | `STORAGE_ORPHAN_GRACE_HOURS` | `24` | don't sweep uploads younger than this |
 | `ANTHROPIC_API_KEY` | `sk-ant-...` | Claude vision |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | |
+| `ANTHROPIC_MODEL` | `claude-haiku-4-5` | |
 
 ---
 

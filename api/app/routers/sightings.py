@@ -1,7 +1,7 @@
 import json
 import logging
 import math
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
@@ -31,6 +31,7 @@ from sqlalchemy.orm import joinedload
 from app.models.user import User
 from app.services.auth_service import get_current_user, get_optional_user
 from app.services.push import push_to_user
+from app.services.rate_limit import enforce_daily_limit
 from app.services.sighting_notifications import notify_sighting_audiences
 from app.services.storage import UPLOADS_PREFIX, get_storage
 from app.utils.matching import find_match_candidates, haversine_km
@@ -40,43 +41,43 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sightings", tags=["sightings"])
 
-# Abuse protection. In-memory only — resets on server restart and does not
-# survive multi-worker deployments. Swap for Redis when going to production.
+# Abuse protection. The daily cap is enforced per authenticated user (per IP
+# for anonymous callers) and backed by the daily_usage table, so it survives
+# restarts and holds across instances. Applied at /analyze — the endpoint that
+# spends a Claude vision call — and counts attempts, not just committed
+# sightings, so failed/uncommitted analyses still draw down the allowance.
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
-MAX_SIGHTINGS_PER_IP_PER_DAY = 50
-_rate_limit_buckets: dict[str, tuple[str, int]] = {}
-
-
-def _enforce_rate_limit(client_ip: str) -> None:
-    today = date.today().isoformat()
-    bucket_date, count = _rate_limit_buckets.get(client_ip, (today, 0))
-    if bucket_date != today:
-        count = 0
-    if count >= MAX_SIGHTINGS_PER_IP_PER_DAY:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Daily limit of {MAX_SIGHTINGS_PER_IP_PER_DAY} sightings reached for this client.",
-        )
-    _rate_limit_buckets[client_ip] = (today, count + 1)
+MAX_SIGHTINGS_PER_DAY = 10
 
 
 @router.post("/analyze", response_model=SightingAnalysis)
 async def analyze_photo(
     request: Request,
     photo: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ):
     """Validate a photo before the user fills metadata.
 
-    Saves the photo to disk and runs Claude vision. Does NOT touch the DB —
-    the client must call POST /sightings to actually commit. Multi-cat,
-    oversize, rate-limit, and vision-service errors are reported here so
-    junk never enters the catalog.
+    Saves the photo to disk and runs Claude vision. Aside from the rate-limit
+    counter, does NOT touch the DB — the client must call POST /sightings to
+    actually commit. Multi-cat, oversize, rate-limit, and vision-service
+    errors are reported here so junk never enters the catalog.
 
     Orphan photos: if the client never commits, the saved file is left on
     disk. A future cleanup job can sweep uploads with no matching Sighting.
     """
-    client_ip = request.client.host if request.client else "unknown"
-    _enforce_rate_limit(client_ip)
+    if current_user:
+        limit_key = f"sightings:user:{current_user.id}"
+    else:
+        client_ip = request.client.host if request.client else "unknown"
+        limit_key = f"sightings:ip:{client_ip}"
+    enforce_daily_limit(
+        db,
+        limit_key,
+        MAX_SIGHTINGS_PER_DAY,
+        f"Daily limit of {MAX_SIGHTINGS_PER_DAY} photos reached. Come back tomorrow!",
+    )
 
     contents = await photo.read()
     if len(contents) > MAX_PHOTO_BYTES:
