@@ -174,6 +174,11 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == body.email.lower()).first()
     if not user or not user.hashed_password or not verify_password(body.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    # Banned accounts don't get a token at all — the app routes this stable
+    # code to the banned screen. Checked only after the password verifies so
+    # ban status isn't leaked to guessers.
+    if user.banned_at is not None:
+        raise HTTPException(status_code=403, detail="account_banned")
     # Credentials are valid but the email was never confirmed — re-send a fresh
     # code and tell the app to route to the verification screen.
     if not user.email_verified:
@@ -215,6 +220,9 @@ def login_apple(body: AppleLoginRequest, db: Session = Depends(get_db)):
     elif not user.apple_sub:
         user.apple_sub = apple_sub
 
+    if user.banned_at is not None:
+        raise HTTPException(status_code=403, detail="account_banned")
+
     db.commit()
     db.refresh(user)
     return TokenResponse(access_token=create_access_token({"sub": str(user.id)}), is_new_user=is_new)
@@ -251,6 +259,9 @@ def login_google(body: GoogleLoginRequest, db: Session = Depends(get_db)):
         is_new = True
     elif not user.google_sub:
         user.google_sub = google_sub
+
+    if user.banned_at is not None:
+        raise HTTPException(status_code=403, detail="account_banned")
 
     db.commit()
     db.refresh(user)
