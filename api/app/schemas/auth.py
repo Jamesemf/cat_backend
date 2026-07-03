@@ -1,6 +1,6 @@
-from datetime import datetime
-
 from pydantic import BaseModel, Field
+
+from app.schemas.media import UtcDatetimeOpt
 
 
 class RegisterRequest(BaseModel):
@@ -49,8 +49,8 @@ class UserOut(BaseModel):
     display_name: str | None = None
     avatar_emoji: str | None = None
     email_verified: bool = False
-    created_at: datetime | None = None
-    display_name_updated_at: datetime | None = None
+    created_at: UtcDatetimeOpt = None
+    display_name_updated_at: UtcDatetimeOpt = None
 
     model_config = {"from_attributes": True}
 
@@ -66,4 +66,4 @@ class UserStats(BaseModel):
     # Exploration ("Fog of Paw"): tiles uncovered and landmarks (checkpoints) lit.
     tiles_explored: int
     checkpoints_lit: int
-    joined_at: datetime | None
+    joined_at: UtcDatetimeOpt

@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from random import randint
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -33,6 +33,7 @@ from app.services.auth_service import (
     verify_password,
 )
 from app.services.email import send_password_reset_code, send_verification_code
+from app.services.rate_limit import enforce_daily_limit
 from app.utils.profanity import contains_profanity
 
 router = APIRouter(tags=["auth"])
@@ -41,6 +42,16 @@ router = APIRouter(tags=["auth"])
 # window. Invalidate it after this many wrong guesses, forcing the attacker to
 # request a fresh code (which also re-randomises the target).
 MAX_CODE_ATTEMPTS = 5
+
+# Abuse caps for the unauthenticated email-sending endpoints. Keyed per client
+# IP so a single host can't loop the endpoint to mailbomb a victim or burn the
+# email/DB budget. Generous enough not to trip a real person retrying.
+MAX_REGISTRATIONS_PER_DAY = 10
+MAX_EMAIL_SENDS_PER_DAY = 10
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 def issue_verification_code(db: Session, email: str) -> None:
@@ -98,7 +109,13 @@ def safe_display_name(name: str | None) -> str | None:
 
 
 @router.post("/register", response_model=TokenResponse)
-def register(body: RegisterRequest, db: Session = Depends(get_db)):
+def register(body: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    enforce_daily_limit(
+        db,
+        f"register:ip:{_client_ip(request)}",
+        MAX_REGISTRATIONS_PER_DAY,
+        "Too many sign-up attempts. Please try again tomorrow.",
+    )
     if db.query(User).filter(User.email == body.email.lower()).first():
         raise HTTPException(status_code=409, detail="Email already registered")
     user = User(
@@ -159,9 +176,17 @@ def verify_email(body: VerifyCodeRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/resend-verification")
-def resend_verification(body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def resend_verification(
+    body: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)
+):
     """Re-send the email-verification code. No-op (still 200) if the email is
     unknown or already verified, to avoid leaking which addresses exist."""
+    enforce_daily_limit(
+        db,
+        f"resend-verification:ip:{_client_ip(request)}",
+        MAX_EMAIL_SENDS_PER_DAY,
+        "Too many requests. Please try again later.",
+    )
     email = body.email.lower()
     user = db.query(User).filter(User.email == email).first()
     if user and not user.email_verified:
@@ -269,7 +294,15 @@ def login_google(body: GoogleLoginRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/forgot-password")
-def forgot_password(body: ForgotPasswordRequest, db: Session = Depends(get_db)):
+def forgot_password(
+    body: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db)
+):
+    enforce_daily_limit(
+        db,
+        f"forgot-password:ip:{_client_ip(request)}",
+        MAX_EMAIL_SENDS_PER_DAY,
+        "Too many requests. Please try again later.",
+    )
     email = body.email.lower()
     user = db.query(User).filter(User.email == email).first()
     if user:

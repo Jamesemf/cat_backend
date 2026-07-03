@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-from app.schemas.media import MediaUrlOpt
+from app.schemas.media import MediaUrlOpt, UtcDatetime, UtcDatetimeOpt
 
 
 class NotificationOut(BaseModel):
@@ -15,8 +15,8 @@ class NotificationOut(BaseModel):
     cat_id: int | None = None
     sighting_id: int | None = None
     post_id: int | None = None
-    created_at: datetime
-    read_at: datetime | None = None
+    created_at: UtcDatetime
+    read_at: UtcDatetimeOpt = None
     # Enrichment for inbox rows
     cat_name: str | None = None
     cat_photo_path: MediaUrlOpt = None

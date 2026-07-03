@@ -2,7 +2,6 @@ import json
 import logging
 import math
 from datetime import datetime, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import func
@@ -30,6 +29,7 @@ from sqlalchemy.orm import joinedload
 
 from app.models.user import User
 from app.services.auth_service import get_current_user, get_optional_user
+from app.services.content_deletion import recompute_cat_after_sighting_removal, safe_unlink
 from app.services.moderation import register_content_strike
 from app.services.push import push_to_user
 from app.services.rate_limit import enforce_daily_limit
@@ -37,6 +37,7 @@ from app.services.sighting_notifications import notify_sighting_audiences
 from app.services.storage import UPLOADS_PREFIX, get_storage
 from app.utils.matching import find_match_candidates, haversine_km
 from app.utils.rarity import compute_rarity_score
+from app.utils.upload import read_upload_capped, sanitize_image
 
 log = logging.getLogger(__name__)
 
@@ -80,19 +81,21 @@ async def analyze_photo(
         f"Daily limit of {MAX_SIGHTINGS_PER_DAY} photos reached. Come back tomorrow!",
     )
 
-    contents = await photo.read()
-    if len(contents) > MAX_PHOTO_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Photo exceeds {MAX_PHOTO_BYTES // 1024 // 1024}MB limit.",
-        )
+    contents = await read_upload_capped(
+        photo,
+        MAX_PHOTO_BYTES,
+        f"Photo exceeds {MAX_PHOTO_BYTES // 1024 // 1024}MB limit.",
+    )
+    # Re-encode through Pillow: strips EXIF/GPS metadata and pins a safe
+    # extension from the decoded format, so a JPEG/HTML polyglot can never be
+    # served from our origin as text/html.
+    clean, ext = sanitize_image(contents)
 
     storage = get_storage()
-    ext = Path(photo.filename).suffix if photo.filename else ".jpg"
-    photo_path = storage.put(contents, ext=ext)
+    photo_path = storage.put(clean, ext=ext)
 
     try:
-        features = await analyze_cat_photo(contents)
+        features = await analyze_cat_photo(clean)
     except VisionError as exc:
         storage.delete(photo_path)
         log.warning("Vision recognition failed: %s", exc)
@@ -525,6 +528,10 @@ def assign_cat(
     if not cat:
         raise HTTPException(status_code=404, detail="Cat not found")
 
+    # Remember the cat we're moving away from so its aggregates can be repaired.
+    old_cat_id = sighting.cat_id
+    removed_photo_path = sighting.photo_path
+
     sighting.cat_id = cat.id
     db.flush()  # so the row above is counted exactly once below
     cat.sighting_count = db.query(Sighting).filter(Sighting.cat_id == cat.id).count()
@@ -536,6 +543,18 @@ def assign_cat(
     if sighting.vibes:
         cat.vibes = sighting.vibes
 
+    # Repair the previous cat: recompute its counters, or retire it if it has no
+    # sightings and no verified claim left. Without this the old cat keeps an
+    # inflated sighting_count, a stale last_photo_path, and a stale rarity.
+    files_to_unlink: list[str] = []
+    if old_cat_id is not None and old_cat_id != cat.id:
+        old_cat = db.query(Cat).filter(Cat.id == old_cat_id).first()
+        if old_cat:
+            files_to_unlink = recompute_cat_after_sighting_removal(
+                db, old_cat, removed_photo_path
+            )
+
     db.commit()
+    safe_unlink(db, files_to_unlink)
     db.refresh(sighting)
     return sighting

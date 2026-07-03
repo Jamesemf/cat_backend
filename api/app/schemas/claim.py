@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.schemas.media import MediaUrlOpt
+from app.schemas.media import MediaUrlOpt, UtcDatetime, UtcDatetimeOpt
 
 INDOOR_OUTDOOR_VALUES = {"indoor", "outdoor", "both"}
 
@@ -20,7 +20,7 @@ class OwnerCard(BaseModel):
     age_years: int | None = None
     fun_fact: str | None = None
     indoor_outdoor: str | None = None
-    claimed_at: datetime | None = None
+    claimed_at: UtcDatetimeOpt = None
 
 
 class ClaimOut(BaseModel):
@@ -35,8 +35,8 @@ class ClaimOut(BaseModel):
     age_years: int | None = None
     fun_fact: str | None = None
     indoor_outdoor: str | None = None
-    created_at: datetime
-    decided_at: datetime | None = None
+    created_at: UtcDatetime
+    decided_at: UtcDatetimeOpt = None
 
     model_config = {"from_attributes": True}
 
@@ -47,7 +47,7 @@ class ClaimStatusResponse(BaseModel):
     owner: OwnerCard | None = None
     my_claim: ClaimOut | None = None
     can_claim: bool = False
-    cooldown_until: datetime | None = None
+    cooldown_until: UtcDatetimeOpt = None
 
 
 class ClaimResult(BaseModel):

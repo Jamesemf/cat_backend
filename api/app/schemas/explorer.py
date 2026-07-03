@@ -4,14 +4,14 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.schemas.media import MediaUrl
+from app.schemas.media import MediaUrl, UtcDatetime
 
 
 class ExplorerPostOut(BaseModel):
     id: int
     photo_path: MediaUrl
     caption: str | None = None
-    created_at: datetime
+    created_at: UtcDatetime
     latitude: float | None = None
     longitude: float | None = None
     user_id: int | None = None
@@ -40,7 +40,7 @@ class CommentOut(BaseModel):
     id: int
     post_id: int
     body: str
-    created_at: datetime
+    created_at: UtcDatetime
     user_id: int | None = None
     user_name: str | None = None
     user_emoji: str | None = None
