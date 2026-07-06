@@ -3,7 +3,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt
+from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt, UtcDatetime
 
 
 class PhotoAdjust(BaseModel):
@@ -37,7 +37,7 @@ class MatchCandidate(BaseModel):
     name: str | None
     breed: str | None
     last_photo_path: MediaUrlOpt
-    last_seen: datetime
+    last_seen: UtcDatetime
     sighting_count: int
     confidence: float
 
@@ -69,7 +69,7 @@ class FeedItem(BaseModel):
     photos: MediaUrlList = []
     latitude: float
     longitude: float
-    spotted_at: datetime
+    spotted_at: UtcDatetime
     spotter_name: str | None
     breed_description: str | None
     vibes: str | None
@@ -110,7 +110,7 @@ class SightingOut(BaseModel):
     photo_path: MediaUrl
     latitude: float
     longitude: float
-    spotted_at: datetime
+    spotted_at: UtcDatetime
     spotter_name: str | None
     breed_description: str | None
     vibes: str | None

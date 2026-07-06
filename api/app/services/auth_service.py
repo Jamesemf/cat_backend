@@ -65,6 +65,11 @@ def get_optional_user(
     user = db.get(User, int(user_id))
     if not user or not user.is_active or user.banned_at is not None:
         return None
+    # Match the hard gate in get_current_user: an unverified account is treated
+    # as anonymous on optional-auth endpoints rather than having content
+    # attributed to it.
+    if not user.email_verified:
+        return None
     return user
 
 

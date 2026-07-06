@@ -99,7 +99,12 @@ REPORT_CAT_TOOL: dict[str, Any] = {
         "properties": {
             "is_cat": {
                 "type": "boolean",
-                "description": "True if at least one cat is clearly visible.",
+                "description": (
+                    "True only if at least one domestic cat (Felis catus) is clearly "
+                    "visible. A dog is NOT a cat — set false for dogs, and for foxes, "
+                    "raccoons, or any other animal. When unsure whether the animal is a "
+                    "cat or a dog, set false."
+                ),
             },
             "is_appropriate": {
                 "type": "boolean",
@@ -123,7 +128,10 @@ REPORT_CAT_TOOL: dict[str, Any] = {
             },
             "not_cat_reason": {
                 "type": ["string", "null"],
-                "description": "Short reason if is_cat is false (e.g. 'dog', 'blurry', 'no animal'). Null otherwise.",
+                "description": (
+                    "Short reason when is_cat is false — name the actual subject, e.g. "
+                    "'dog', 'fox', 'blurry', 'no animal'. Null otherwise."
+                ),
             },
             "primary_color": {
                 "type": ["string", "null"],
@@ -178,6 +186,11 @@ REPORT_CAT_TOOL: dict[str, Any] = {
 SYSTEM_PROMPT = (
     "You are a cat re-identification assistant. "
     "Analyze the photo and call the `report_cat` tool exactly once. "
+    "Only a domestic cat (Felis catus) counts as a cat. A dog is NOT a cat: dogs, "
+    "foxes, and other animals must set is_cat=false with not_cat_reason naming the "
+    "animal (e.g. 'dog'). Dogs — especially small or fluffy breeds — can resemble "
+    "cats, so look carefully at ears, muzzle and eyes; if it is a dog, or you are "
+    "not confident the animal is a cat, set is_cat=false. "
     "If no cat is clearly visible set is_cat=false and leave feature fields null. "
     "Also screen the photo for harmful content: set is_appropriate=false with an "
     "inappropriate_reason for violence, gore, animal cruelty, nudity or sexual "

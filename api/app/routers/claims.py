@@ -1,6 +1,5 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.exc import IntegrityError
@@ -32,6 +31,7 @@ from app.services.claim_verification import (
 from app.services.moderation import register_content_strike
 from app.services.storage import UPLOADS_PREFIX, get_storage
 from app.services.vision import VisionError
+from app.utils.upload import read_upload_capped, sanitize_image
 
 log = logging.getLogger(__name__)
 
@@ -120,7 +120,11 @@ async def submit_claim(
         raise HTTPException(status_code=409, detail=detail)
 
     now = datetime.now(timezone.utc)
-    cooldown_cutoff = now - timedelta(hours=CLAIM_COOLDOWN_HOURS)
+    # decided_at / created_at are stored naive-UTC, so compare against naive-UTC
+    # cutoffs. Binding a tz-aware value here would serialize with an offset and
+    # mis-compare against the offset-less stored strings on SQLite.
+    now_naive = now.replace(tzinfo=None)
+    cooldown_cutoff = now_naive - timedelta(hours=CLAIM_COOLDOWN_HOURS)
     recent_rejection = (
         db.query(CatClaim)
         .filter(
@@ -139,7 +143,7 @@ async def submit_claim(
             detail=f"A recent claim on this cat was rejected. Try again after {cooldown_until.isoformat()}.",
         )
 
-    day_cutoff = now - timedelta(days=1)
+    day_cutoff = now_naive - timedelta(days=1)
     attempts_today = (
         db.query(CatClaim)
         .filter(CatClaim.user_id == current_user.id, CatClaim.created_at >= day_cutoff)
@@ -155,15 +159,16 @@ async def submit_claim(
     photos_bytes: list[bytes] = []
     saved_paths: list[str] = []
     for photo in photos:
-        contents = await photo.read()
-        if len(contents) > MAX_PHOTO_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Each photo must be under {MAX_PHOTO_BYTES // 1024 // 1024}MB.",
-            )
-        photos_bytes.append(contents)
-        ext = Path(photo.filename).suffix if photo.filename else ".jpg"
-        saved_paths.append(storage.put(contents, ext=ext, prefix=CLAIM_PREFIX))
+        contents = await read_upload_capped(
+            photo,
+            MAX_PHOTO_BYTES,
+            f"Each photo must be under {MAX_PHOTO_BYTES // 1024 // 1024}MB.",
+        )
+        # Strip metadata (EXIF/GPS) and pin a safe extension from the decoded
+        # image format; store and score the re-encoded bytes.
+        clean, ext = sanitize_image(contents)
+        photos_bytes.append(clean)
+        saved_paths.append(storage.put(clean, ext=ext, prefix=CLAIM_PREFIX))
 
     try:
         photo_features = await analyze_claim_photos(photos_bytes)
@@ -324,10 +329,13 @@ def update_owner_card(
     if body.indoor_outdoor is not None and body.indoor_outdoor not in INDOOR_OUTDOOR_VALUES:
         raise HTTPException(status_code=400, detail="indoor_outdoor must be indoor, outdoor or both.")
 
+    # Apply only the fields the client actually sent (exclude_unset), so an
+    # explicit null clears a field rather than being ignored — otherwise
+    # fun_fact/real_name could never be emptied once set.
+    fields = body.model_dump(exclude_unset=True)
     for field in ("real_name", "likes_petting", "accepts_treats", "age_years", "fun_fact", "indoor_outdoor"):
-        value = getattr(body, field)
-        if value is not None:
-            setattr(claim, field, value)
+        if field in fields:
+            setattr(claim, field, fields[field])
 
     # Renaming through the owner card also renames the cat itself.
     if body.real_name:

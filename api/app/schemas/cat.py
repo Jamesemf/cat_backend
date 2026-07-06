@@ -5,7 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel, field_validator, model_validator
 
 from app.schemas.claim import OwnerCard
-from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt
+from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt, UtcDatetime, UtcDatetimeOpt
 from app.schemas.sighting import PhotoAdjust, _parse_photo_adjust
 
 
@@ -19,7 +19,7 @@ class CatNearby(BaseModel):
     breed: str | None
     last_lat: float | None
     last_lng: float | None
-    last_seen: datetime | None
+    last_seen: UtcDatetimeOpt
     photos: MediaUrlList = []
 
     model_config = {"from_attributes": True}
@@ -31,7 +31,7 @@ class SightingOut(BaseModel):
     photo_path: MediaUrl
     latitude: float
     longitude: float
-    spotted_at: datetime
+    spotted_at: UtcDatetime
     spotter_name: str | None
     # The spotter's polaroid keepsake for this sighting (null = default polaroid).
     frame_id: str | None = None
@@ -70,7 +70,7 @@ class MyPhotoOut(BaseModel):
     the client resolves it for display."""
 
     photo_path: str
-    spotted_at: datetime
+    spotted_at: UtcDatetime
 
     model_config = {"from_attributes": True}
 
@@ -94,8 +94,8 @@ class CatOut(CatBase):
     id: int
     rarity_score: float
     sighting_count: int
-    first_seen: datetime
-    last_seen: datetime
+    first_seen: UtcDatetime
+    last_seen: UtcDatetime
     last_lat: float | None
     last_lng: float | None
     last_photo_path: MediaUrlOpt = None

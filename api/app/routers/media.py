@@ -14,6 +14,16 @@ from app.services.storage import UPLOADS_PREFIX, LocalStorage, get_storage
 
 router = APIRouter(tags=["media"])
 
+# Uploads are re-encoded to one of these on the way in (see utils/upload.py), so
+# we serve them with an explicit image content type and never let the browser
+# sniff a stored file into an executable type (e.g. a legacy .html polyglot).
+_IMAGE_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
 
 @router.get("/uploads/{subpath:path}")
 def serve_upload(subpath: str):
@@ -30,7 +40,12 @@ def serve_upload(subpath: str):
             raise HTTPException(status_code=404, detail="Not found.")
         if not path.is_file():
             raise HTTPException(status_code=404, detail="Not found.")
-        return FileResponse(path)
+        media_type = _IMAGE_TYPES.get(path.suffix.lower(), "application/octet-stream")
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     if not storage.exists(key):
         raise HTTPException(status_code=404, detail="Not found.")

@@ -1,6 +1,5 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
@@ -39,6 +38,7 @@ from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
 from app.utils.rarity import compute_rarity_score
 from app.utils.territory import build_territory_geojson
+from app.utils.upload import read_upload_capped, sanitize_image
 
 router = APIRouter(prefix="/cats", tags=["cats"])
 
@@ -139,15 +139,16 @@ async def register_cat(
         )
 
     cover = photos[0]
-    contents = await cover.read()
-    if len(contents) > MAX_PHOTO_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Each photo must be under {MAX_PHOTO_BYTES // 1024 // 1024}MB.",
-        )
+    contents = await read_upload_capped(
+        cover,
+        MAX_PHOTO_BYTES,
+        f"Each photo must be under {MAX_PHOTO_BYTES // 1024 // 1024}MB.",
+    )
+    # Strip metadata (EXIF/GPS) and pin a safe extension from the decoded format.
+    clean, ext = sanitize_image(contents)
 
     try:
-        features = await analyze_cat_photo(contents)
+        features = await analyze_cat_photo(clean)
     except VisionError as exc:
         log.warning("Register vision failed: %s", exc)
         raise HTTPException(
@@ -168,8 +169,7 @@ async def register_cat(
     if features.cat_count > 1:
         raise HTTPException(status_code=400, detail="Please use a photo of just your cat.")
 
-    ext = Path(cover.filename).suffix if cover.filename else ".jpg"
-    photo_path = get_storage().put(contents, ext=ext)
+    photo_path = get_storage().put(clean, ext=ext)
 
     now = datetime.now(timezone.utc)
     cat = Cat(

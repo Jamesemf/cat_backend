@@ -9,11 +9,34 @@ raw ``str`` type so the client round-trips the key, not the URL.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated
 
 from pydantic import PlainSerializer
 
 from app.services.storage import get_storage
+
+
+def _iso_utc(value: datetime | None) -> str | None:
+    """Serialize a datetime as ISO-8601 that always carries a UTC offset.
+
+    Our datetime columns store naive UTC, so FastAPI would otherwise emit
+    ``"2026-07-03T09:00:00"`` with no zone — which JS ``new Date()`` parses as
+    *local* time, throwing off every relative-time/date display on the client.
+    Stamp naive values as UTC so the offset is explicit.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+# Apply to every datetime field that goes out in a response so the client always
+# receives a zoned timestamp. when_used="json" keeps python-mode model_dump()
+# returning real datetimes for internal use.
+UtcDatetime = Annotated[datetime, PlainSerializer(_iso_utc, when_used="json")]
+UtcDatetimeOpt = Annotated[datetime | None, PlainSerializer(_iso_utc, when_used="json")]
 
 
 def _resolve(value: str | None) -> str | None:

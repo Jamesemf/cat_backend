@@ -136,13 +136,27 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         rank = {cat_id: i for i, cat_id in enumerate(order)}
         cats.sort(key=lambda c: rank.get(c.id, len(order)))
 
+    # A cat's chosen cover must be one of that cat's own sighting photos —
+    # otherwise a crafted catalog_layout could point a public card at any storage
+    # key (e.g. someone else's claim evidence). Gather the legitimate keys first.
+    valid_covers: dict[int, set[str]] = {}
+    if cats:
+        rows = (
+            db.query(Sighting.cat_id, Sighting.photo_path)
+            .filter(Sighting.cat_id.in_([c.id for c in cats]))
+            .all()
+        )
+        for cid, path in rows:
+            if path:
+                valid_covers.setdefault(cid, set()).add(path)
+
     # Swap in each cat's chosen cover photo (a raw storage key, re-resolved to a
     # URL on output) so the public card matches what the owner highlighted.
     cat_out: list[CatOut] = []
     for c in cats:
         co = CatOut.model_validate(c)
         cover = covers.get(str(c.id))
-        if cover:
+        if cover and cover in valid_covers.get(c.id, set()):
             co.last_photo_path = cover
         cat_out.append(co)
 
