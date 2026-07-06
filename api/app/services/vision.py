@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import anthropic
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import settings
 
@@ -279,6 +279,9 @@ def _prepare_image_for_api(image_bytes: bytes, max_dimension: int) -> bytes:
     """
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
+            # Respect EXIF orientation so the model sees the photo upright, the
+            # same way the stored copy is normalised in utils/upload.py.
+            img = ImageOps.exif_transpose(img)
             if img.mode != "RGB":
                 img = img.convert("RGB")
             longest = max(img.width, img.height)

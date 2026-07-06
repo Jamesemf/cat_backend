@@ -19,7 +19,7 @@ from __future__ import annotations
 import io
 
 from fastapi import HTTPException, UploadFile
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 _CHUNK = 64 * 1024
 
@@ -62,6 +62,10 @@ def sanitize_image(data: bytes) -> tuple[bytes, str]:
                     detail="Unsupported image type. Please upload a JPEG, PNG, or WebP.",
                 )
             img.load()
+            # Bake the EXIF orientation into the pixels BEFORE we drop metadata
+            # below — otherwise a portrait/rotated capture loses its "rotate me"
+            # hint and displays sideways/upside-down everywhere it's shown.
+            img = ImageOps.exif_transpose(img)
             out = io.BytesIO()
             # Re-saving without passing an exif/metadata block drops it entirely.
             if fmt == "JPEG":
