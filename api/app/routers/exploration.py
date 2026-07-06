@@ -51,6 +51,12 @@ def get_tiles(
         .all()
     )
     keys = [r[0] for r in rows]
+    home_rows = (
+        db.query(ExploredTile.tile_key)
+        .filter(ExploredTile.user_id == current_user.id, ExploredTile.is_home.is_(True))
+        .all()
+    )
+    home_keys = [r[0] for r in home_rows]
     cp_rows = (
         db.query(ExploredTile.checkpoint_id)
         .filter(
@@ -65,6 +71,7 @@ def get_tiles(
     return ExplorationState(
         tile_keys=keys,
         checkpoint_ids=checkpoint_ids,
+        home_tile_keys=home_keys,
         tiles_explored=tiles,
         checkpoints_lit=checkpoints,
     )

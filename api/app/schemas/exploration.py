@@ -36,3 +36,7 @@ class ExplorationState(ExplorationCounts):
 
     tile_keys: list[str]
     checkpoint_ids: list[str]
+    # The subset of tile_keys that are free home-neighbourhood seed tiles. Lets a
+    # new device restore the user's home so it isn't re-prompted, and excludes
+    # them from the locally-computed tiles_explored tally.
+    home_tile_keys: list[str] = Field(default_factory=list)
