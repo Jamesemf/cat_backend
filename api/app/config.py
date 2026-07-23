@@ -6,7 +6,10 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./cats.db"
     secret_key: str = "change-me"
-    access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
+    # Tokens are rotated by the app on every launch (POST /auth/refresh), so
+    # this is the maximum time a device can stay *closed* before its session
+    # lapses — not a cap on session length.
+    access_token_expire_minutes: int = 60 * 24 * 30  # 30 days
     # Cross-origin policy. The API authenticates with Bearer tokens (not cookies),
     # so credentials are never needed and a wildcard origin is safe. Set a
     # comma-separated allowlist to lock the browser (web) build down further.

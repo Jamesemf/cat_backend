@@ -388,6 +388,19 @@ def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
     return {"message": "Password reset successfully"}
 
 
+@router.post("/refresh", response_model=TokenResponse)
+def refresh_token(current_user: User = Depends(get_current_user)):
+    """Reissue a fresh access token for a still-valid session.
+
+    The app calls this on launch, sliding the session forward so an active
+    user never reaches the fixed token expiry — only a device that stays
+    closed for the whole expiry window has to sign in again. Stateless (the
+    old token remains valid until its own expiry), so a failed rotation
+    costs nothing.
+    """
+    return TokenResponse(access_token=create_access_token({"sub": str(current_user.id)}))
+
+
 @router.get("/me", response_model=UserOut)
 def get_me(current_user: User = Depends(get_current_user)):
     return current_user
