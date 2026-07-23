@@ -1,4 +1,5 @@
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -36,6 +37,7 @@ from app.services.claim_verification import MAX_CLAIM_ATTEMPTS_PER_DAY, MAX_PHOT
 from app.services.moderation import register_content_strike
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
+from app.utils.matching import haversine_km
 from app.utils.rarity import compute_rarity_score
 from app.utils.territory import build_territory_geojson
 from app.utils.upload import read_upload_capped, sanitize_image
@@ -54,10 +56,45 @@ def list_cats(limit: int = 100, db: Session = Depends(get_db)):
 
 
 @router.get("/nearby", response_model=list[CatNearby])
-def list_cats_nearby(limit: int = 100, photos: int = 8, db: Session = Depends(get_db)):
+def list_cats_nearby(
+    limit: int = 100,
+    photos: int = 8,
+    lat: float | None = None,
+    lng: float | None = None,
+    radius_km: float = 3.0,
+    db: Session = Depends(get_db),
+):
     """Cats for the onboarding picker, each with up to `photos` recent photos so a
-    user can recognise their own cat by sight rather than by an assigned nickname."""
-    cats = db.query(Cat).order_by(Cat.last_seen.desc()).limit(limit).all()
+    user can recognise their own cat by sight rather than by an assigned nickname.
+
+    When lat/lng are provided, only cats last seen within `radius_km` are returned,
+    nearest first — so the picker shows cats the user could plausibly own rather
+    than whatever was most recently spotted anywhere in the world. Without a
+    location we fall back to most-recently-seen ordering.
+    """
+    if lat is not None and lng is not None:
+        # Bounding-box prefilter in SQL (SQLite has no PostGIS), then a precise
+        # Haversine check — mirrors utils.matching.find_match_candidates.
+        lat_delta = radius_km / 111.0
+        lng_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 0.001)
+        prefiltered = (
+            db.query(Cat)
+            .filter(
+                Cat.last_lat.isnot(None),
+                Cat.last_lng.isnot(None),
+                Cat.last_lat.between(lat - lat_delta, lat + lat_delta),
+                Cat.last_lng.between(lng - lng_delta, lng + lng_delta),
+            )
+            .all()
+        )
+        within = [
+            (c, haversine_km(lat, lng, c.last_lat, c.last_lng)) for c in prefiltered
+        ]
+        within = [(c, d) for c, d in within if d <= radius_km]
+        within.sort(key=lambda cd: cd[1])
+        cats = [c for c, _ in within[:limit]]
+    else:
+        cats = db.query(Cat).order_by(Cat.last_seen.desc()).limit(limit).all()
     ids = [c.id for c in cats]
     by_cat: dict[int, list[str]] = {}
     if ids:
