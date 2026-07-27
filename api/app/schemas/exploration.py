@@ -7,9 +7,6 @@ class TileReport(BaseModel):
     """A single newly-uncovered tile the client is reporting."""
 
     tile_key: str = Field(..., max_length=32)
-    # Present when the tile was unlocked by reaching a landmark (a checkpoint).
-    checkpoint_id: str | None = Field(default=None, max_length=128)
-    checkpoint_name: str | None = Field(default=None, max_length=200)
     # True for the free home-neighbourhood seed tiles, which don't count toward
     # tiles_explored (see ExploredTile.is_home).
     is_home: bool = Field(default=False)
@@ -27,15 +24,13 @@ class ExplorationCounts(BaseModel):
     report so the client gets fresh counts without re-fetching the whole set."""
 
     tiles_explored: int
-    checkpoints_lit: int
 
 
 class ExplorationState(ExplorationCounts):
-    """The full explored-tile set (for restoring the fog on a new device), the
-    distinct landmarks (checkpoints) lit, and the aggregate counts."""
+    """The full explored-tile set (for restoring the fog on a new device) and the
+    aggregate counts."""
 
     tile_keys: list[str]
-    checkpoint_ids: list[str]
     # The subset of tile_keys that are free home-neighbourhood seed tiles. Lets a
     # new device restore the user's home so it isn't re-prompted, and excludes
     # them from the locally-computed tiles_explored tally.

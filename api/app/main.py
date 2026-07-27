@@ -112,6 +112,14 @@ with engine.connect() as _conn:
         if _et_cols and "is_home" not in _et_cols:
             _conn.execute(_text("ALTER TABLE explored_tiles ADD COLUMN is_home BOOLEAN NOT NULL DEFAULT 0"))
             _conn.commit()
+        # Landmarks/checkpoints were removed from the game; DROP COLUMN needs SQLite >= 3.35
+        # (older dev machines just leave the columns behind, inert).
+        import sqlite3 as _sqlite3
+        if _sqlite3.sqlite_version_info >= (3, 35, 0):
+            for _col in ("checkpoint_id", "checkpoint_name"):
+                if _col in _et_cols:
+                    _conn.execute(_text(f"ALTER TABLE explored_tiles DROP COLUMN {_col}"))
+                    _conn.commit()
     else:
         # Postgres (prod/Neon): create_all won't add a column to the existing
         # users table. ADD COLUMN IF NOT EXISTS is idempotent on Postgres.
@@ -145,6 +153,15 @@ with engine.connect() as _conn:
         _conn.commit()
         _conn.execute(_text(
             "ALTER TABLE explored_tiles ADD COLUMN IF NOT EXISTS is_home BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        _conn.commit()
+        # Landmarks/checkpoints were removed from the game.
+        _conn.execute(_text(
+            "ALTER TABLE explored_tiles DROP COLUMN IF EXISTS checkpoint_id"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE explored_tiles DROP COLUMN IF EXISTS checkpoint_name"
         ))
         _conn.commit()
         _conn.execute(_text(

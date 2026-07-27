@@ -13,11 +13,6 @@ class ExploredTile(Base):
     so exploration survives a reinstall, restores the fog on a new device, and
     powers exploration achievements (and, later, leaderboards). One row per
     (user, tile) — re-reporting a tile is a no-op thanks to the unique constraint.
-
-    A row whose checkpoint_id is set marks a *lit checkpoint*: a tile the user
-    reached because it held a real landmark (a Mapbox POI). Folding that flag in
-    here avoids a second table — "checkpoints lit" is just the count of rows with
-    a non-null checkpoint_id.
     """
 
     __tablename__ = "explored_tiles"
@@ -30,10 +25,6 @@ class ExploredTile(Base):
     # Hex-grid key, "q,r" — the same key FogContext persists locally. Indexed so
     # the nearby-sighting fan-out can find "who explored these tiles" quickly.
     tile_key: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    # Set when the tile was unlocked by walking to a landmark; null for plain
-    # tiles unlocked by reveal-bombs around an explored area.
-    checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    checkpoint_name: Mapped[str | None] = mapped_column(String, nullable=True)
     # True for the free "home neighbourhood" tiles seeded when the user first sets
     # their start point. These are a gift, not exploration, so they're excluded
     # from tiles_explored (achievements + leaderboard) — mirroring the map HUD,

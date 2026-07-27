@@ -532,15 +532,9 @@ def get_my_stats(current_user: User = Depends(get_current_user), db: Session = D
         .filter(ExploredTile.user_id == current_user.id, ExploredTile.is_home.is_(False))
         .count()
     )
-    checkpoints_lit = (
-        db.query(ExploredTile)
-        .filter(ExploredTile.user_id == current_user.id, ExploredTile.checkpoint_id.isnot(None))
-        .count()
-    )
     return UserStats(
         my_sightings=my_sightings,
         unique_cats_spotted=unique_cats,
         tiles_explored=tiles_explored,
-        checkpoints_lit=checkpoints_lit,
         joined_at=current_user.created_at,
     )

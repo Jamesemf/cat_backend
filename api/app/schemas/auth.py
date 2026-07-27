@@ -63,7 +63,6 @@ class UpdateMeRequest(BaseModel):
 class UserStats(BaseModel):
     my_sightings: int
     unique_cats_spotted: int
-    # Exploration ("Fog of Paw"): tiles uncovered and landmarks (checkpoints) lit.
+    # Exploration ("Fog of Paw"): tiles uncovered.
     tiles_explored: int
-    checkpoints_lit: int
     joined_at: UtcDatetimeOpt
