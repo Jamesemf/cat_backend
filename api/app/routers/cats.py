@@ -33,6 +33,7 @@ from app.schemas.cat import (
 )
 from app.schemas.claim import INDOOR_OUTDOOR_VALUES
 from app.services.auth_service import get_current_user, require_admin
+from app.services.catalog import own_cover_photos, parse_covers
 from app.services.claim_verification import MAX_CLAIM_ATTEMPTS_PER_DAY, MAX_PHOTOS
 from app.services.moderation import register_content_strike
 from app.services.storage import get_storage
@@ -446,12 +447,25 @@ def list_my_cats(
     cat_ids = [row[0] for row in rows]
     if not cat_ids:
         return []
-    return (
+    cats = (
         db.query(Cat)
         .filter(Cat.id.in_(cat_ids))
         .order_by(Cat.last_seen.desc())
         .all()
     )
+
+    # `Cat.last_photo_path` is whoever photographed the cat last — frequently
+    # another spotter. Swap in this user's own photo (their chosen highlight, else
+    # their latest) so a Cat-a-log card only ever shows a photo they took.
+    photos = own_cover_photos(
+        db, current_user.id, cat_ids, parse_covers(current_user.catalog_layout)
+    )
+    out: list[CatOut] = []
+    for c in cats:
+        co = CatOut.model_validate(c)
+        co.last_photo_path = photos.get(c.id)
+        out.append(co)
+    return out
 
 
 @router.get("/{cat_id}/my-photos", response_model=list[MyPhotoOut])

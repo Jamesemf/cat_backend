@@ -14,6 +14,7 @@ from app.models.sighting import Sighting
 from app.models.user import User
 from app.schemas.cat import CatOut
 from app.services.auth_service import get_current_user
+from app.services.catalog import own_cover_photos
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -102,6 +103,17 @@ def update_my_catalog(
     db.commit()
 
 
+@router.get("/me/catalog", response_model=CatalogLayoutIn)
+def get_my_catalog(current_user: User = Depends(get_current_user)):
+    """The current user's saved Cat-a-log arrangement. The client caches this on
+    the device, but the cache doesn't survive a reinstall or reach a second
+    device — and since every save PUTs the whole arrangement, a client starting
+    from an empty cache would flush the real one away. Hydrating from here first
+    is what stops that."""
+    order, frames, covers, adjusts = _parse_layout(current_user.catalog_layout)
+    return CatalogLayoutIn(order=order, frames=frames, covers=covers, adjusts=adjusts)
+
+
 @router.get("/{user_id}", response_model=PublicProfileOut)
 def get_public_profile(user_id: int, db: Session = Depends(get_db)):
     """A spotter's public profile: display name + avatar, a couple of
@@ -136,28 +148,17 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         rank = {cat_id: i for i, cat_id in enumerate(order)}
         cats.sort(key=lambda c: rank.get(c.id, len(order)))
 
-    # A cat's chosen cover must be one of that cat's own sighting photos —
-    # otherwise a crafted catalog_layout could point a public card at any storage
-    # key (e.g. someone else's claim evidence). Gather the legitimate keys first.
-    valid_covers: dict[int, set[str]] = {}
-    if cats:
-        rows = (
-            db.query(Sighting.cat_id, Sighting.photo_path)
-            .filter(Sighting.cat_id.in_([c.id for c in cats]))
-            .all()
-        )
-        for cid, path in rows:
-            if path:
-                valid_covers.setdefault(cid, set()).add(path)
-
-    # Swap in each cat's chosen cover photo (a raw storage key, re-resolved to a
-    # URL on output) so the public card matches what the owner highlighted.
+    # Swap in the photo this spotter actually took of each cat (their chosen
+    # cover, else their latest) as a raw storage key, re-resolved to a URL on
+    # output. `Cat.last_photo_path` would otherwise be whoever photographed the
+    # cat last, so a public card could show a stranger's photo; validating the
+    # cover against their own sightings also stops a crafted catalog_layout
+    # pointing a card at any storage key (e.g. someone else's claim evidence).
+    photos = own_cover_photos(db, user_id, [c.id for c in cats], covers)
     cat_out: list[CatOut] = []
     for c in cats:
         co = CatOut.model_validate(c)
-        cover = covers.get(str(c.id))
-        if cover and cover in valid_covers.get(c.id, set()):
-            co.last_photo_path = cover
+        co.last_photo_path = photos.get(c.id)
         cat_out.append(co)
 
     tiles_explored = (
