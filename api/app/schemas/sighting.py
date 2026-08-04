@@ -95,6 +95,10 @@ class FeedItem(BaseModel):
     comment_count: int = 0
     meowed_by_me: bool = False
     is_mine: bool = False
+    # This spot's post is withheld pending moderator review. Only ever true for
+    # the spotter themselves (or an admin) — for everyone else it's filtered out
+    # of the feed entirely.
+    hidden: bool = False
     # Spotter's polaroid customization for this sighting. Null fields render the
     # default polaroid (classic frame, cover-fit, date stamp).
     frame_id: str | None = None

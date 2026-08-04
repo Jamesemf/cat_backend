@@ -35,7 +35,7 @@ from app.schemas.claim import INDOOR_OUTDOOR_VALUES
 from app.services.auth_service import get_current_user, require_admin
 from app.services.catalog import own_cover_photos, parse_covers
 from app.services.claim_verification import MAX_CLAIM_ATTEMPTS_PER_DAY, MAX_PHOTOS
-from app.services.moderation import register_content_strike
+from app.services.moderation import register_content_strike, sighting_has_hidden_post
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
 from app.utils.matching import haversine_km
@@ -101,7 +101,11 @@ def list_cats_nearby(
     if ids:
         rows = (
             db.query(Sighting.cat_id, Sighting.photo_path)
-            .filter(Sighting.cat_id.in_(ids), Sighting.photo_path.isnot(None))
+            .filter(
+                Sighting.cat_id.in_(ids),
+                Sighting.photo_path.isnot(None),
+                ~sighting_has_hidden_post(),
+            )
             .order_by(Sighting.spotted_at.desc())
             .all()
         )

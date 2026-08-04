@@ -31,6 +31,44 @@ def delete_post_dependents(db: Session, post_ids: list[int]) -> None:
     db.query(Notification).filter(Notification.post_id.in_(post_ids)).delete(synchronize_session=False)
 
 
+def purge_post(db: Session, post: ExplorerPost) -> list[str]:
+    """Delete a post and everything hanging off it. Does not commit.
+
+    Sighting-originated posts also delete the underlying sighting (otherwise the
+    startup backfill would resurrect the post) and repair the cat's counters.
+    Returns photo paths to unlink *after* the caller commits — shared by author
+    deletion and moderator removal so both clear the map, not just the feed.
+    """
+    files_to_unlink: list[str] = []
+    delete_post_dependents(db, [post.id])
+
+    if post.sighting_id is not None:
+        sighting = db.query(Sighting).filter(Sighting.id == post.sighting_id).first()
+        db.delete(post)
+        if sighting:
+            db.query(Notification).filter(Notification.sighting_id == sighting.id).delete(
+                synchronize_session=False
+            )
+            cat = sighting.cat
+            files_to_unlink.append(sighting.photo_path)
+            db.delete(sighting)
+            db.flush()
+            if cat:
+                files_to_unlink.extend(
+                    recompute_cat_after_sighting_removal(db, cat, sighting.photo_path)
+                )
+    else:
+        # Direct upload: the post owns its photo. The "my new cat" flow may
+        # have set it as the cat's profile photo — clear that reference.
+        db.query(Cat).filter(Cat.last_photo_path == post.photo_path).update(
+            {Cat.last_photo_path: None}, synchronize_session=False
+        )
+        files_to_unlink.append(post.photo_path)
+        db.delete(post)
+
+    return files_to_unlink
+
+
 def delete_cat(db: Session, cat: Cat) -> list[str]:
     """Remove a cat and everything that references it.
 

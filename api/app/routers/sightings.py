@@ -4,7 +4,7 @@ import math
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -30,7 +30,7 @@ from sqlalchemy.orm import joinedload
 from app.models.user import User
 from app.services.auth_service import get_current_user, get_optional_user
 from app.services.content_deletion import recompute_cat_after_sighting_removal, safe_unlink
-from app.services.moderation import register_content_strike
+from app.services.moderation import register_content_strike, sighting_has_hidden_post
 from app.services.push import push_to_user
 from app.services.rate_limit import enforce_daily_limit
 from app.services.sighting_notifications import notify_sighting_audiences
@@ -350,6 +350,16 @@ def get_feed(
     offset = max(0, offset)
     query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))
 
+    # Moderated-away spots drop out of the feed. Admins still see them (so they
+    # can review in context) and so does the author, who is told it's hidden
+    # rather than left wondering where their spot went.
+    if current_user is None:
+        query = query.filter(~sighting_has_hidden_post())
+    elif not current_user.is_admin:
+        query = query.filter(
+            or_(~sighting_has_hidden_post(), Sighting.user_id == current_user.id)
+        )
+
     if lat is not None and lng is not None:
         lat_delta = radius_km / 111.0
         lng_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 0.001)
@@ -379,7 +389,7 @@ def get_feed(
     if cat_ids:
         rows = (
             db.query(Sighting.cat_id, Sighting.photo_path)
-            .filter(Sighting.cat_id.in_(cat_ids))
+            .filter(Sighting.cat_id.in_(cat_ids), ~sighting_has_hidden_post())
             .order_by(Sighting.spotted_at.desc())
             .all()
         )
@@ -454,6 +464,7 @@ def get_feed(
                 comment_count=comment_counts.get(post.id, 0) if post else 0,
                 meowed_by_me=post.id in my_meows if post else False,
                 is_mine=bool(current_user and post and post.user_id == current_user.id),
+                hidden=bool(post and post.hidden_at is not None),
                 frame_id=s.frame_id,
                 photo_adjust=s.photo_adjust,
                 caption=s.caption,

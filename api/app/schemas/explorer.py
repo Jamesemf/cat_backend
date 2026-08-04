@@ -25,6 +25,9 @@ class ExplorerPostOut(BaseModel):
     comment_count: int = 0
     meowed_by_me: bool = False
     is_mine: bool = False
+    # Withheld pending moderator review. Only ever true for the post's author
+    # (who gets a "hidden" badge instead of a silent disappearance) or an admin.
+    hidden: bool = False
 
 
 class MeowResult(BaseModel):
@@ -55,3 +58,39 @@ REPORT_REASONS = {"not_a_cat", "inappropriate", "spam", "animal_harm", "other"}
 class ReportCreate(BaseModel):
     reason: str
     detail: str | None = Field(default=None, max_length=500)
+
+
+class ReportOut(BaseModel):
+    id: int
+    reason: str
+    detail: str | None = None
+    created_at: UtcDatetime
+    reporter_id: int
+    reporter_name: str | None = None
+
+
+class ReportedPostOut(BaseModel):
+    """One row of the moderation queue: a post plus the case against it."""
+
+    post_id: int
+    photo_path: MediaUrl
+    caption: str | None = None
+    created_at: UtcDatetime
+    hidden: bool = False
+    hidden_reason: str | None = None
+    # The post's author — nullable, matching legacy anonymous sightings.
+    author_id: int | None = None
+    author_name: str | None = None
+    author_strikes: int = 0
+    cat_id: int | None = None
+    sighting_id: int | None = None
+    open_report_count: int = 0
+    # Distinct reasons given, most-reported first — the gist without opening it.
+    reasons: list[str] = []
+    reports: list[ReportOut] = []
+
+
+class ModerationActionResult(BaseModel):
+    post_id: int
+    hidden: bool
+    open_report_count: int

@@ -481,6 +481,10 @@ def delete_me(
     db.query(PostComment).filter(PostComment.user_id == uid).delete(synchronize_session=False)
     db.query(PostMeow).filter(PostMeow.user_id == uid).delete(synchronize_session=False)
     db.query(PostReport).filter(PostReport.reporter_id == uid).delete(synchronize_session=False)
+    # A departing moderator's decisions stand, but stop pointing at a dead row.
+    db.query(PostReport).filter(PostReport.reviewed_by_id == uid).update(
+        {PostReport.reviewed_by_id: None}, synchronize_session=False
+    )
     db.query(ExploredTile).filter(ExploredTile.user_id == uid).delete(synchronize_session=False)
 
     # 4. Claims (all statuses) and their evidence photos. Verified claims

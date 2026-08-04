@@ -36,6 +36,12 @@ class ExplorerPost(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), index=True
     )
+    # Moderation: set => the post is withheld from the feed, cat grids and all
+    # interactions. Reversible (unlike deletion), so it's safe for the automatic
+    # report threshold to set it — see services/moderation.py. NULL is visible.
+    hidden_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    # auto_reports | moderator
+    hidden_reason: Mapped[str | None] = mapped_column(String, nullable=True)
 
     user = relationship("User")
     sighting = relationship("Sighting")
@@ -71,8 +77,14 @@ class PostComment(Base):
 
 
 class PostReport(Base):
-    """A user's report against an Explorer post. Store-only for now — no
-    auto-hide threshold; one report per user per post."""
+    """A user's report against an Explorer post. One report per user per post,
+    ever — the unique constraint makes repeat reports a no-op rather than a way
+    to stack the auto-hide threshold.
+
+    A report is 'open' until a moderator resolves it (reviewed_at set). Only
+    open reports count toward the auto-hide threshold, so dismissing a post's
+    reports doesn't leave it one stale report away from hiding again.
+    """
 
     __tablename__ = "post_reports"
     __table_args__ = (UniqueConstraint("post_id", "reporter_id", name="uq_report_post_reporter"),)
@@ -84,3 +96,11 @@ class PostReport(Base):
     reason: Mapped[str] = mapped_column(String, nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    # Set when a moderator dismissed, hid, or removed in response to this report.
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    reviewed_by_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=True
+    )
+
+    post = relationship("ExplorerPost")
+    reporter = relationship("User", foreign_keys=[reporter_id])

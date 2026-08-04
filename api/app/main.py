@@ -11,7 +11,18 @@ import app.models  # noqa: F401 — ensures models are registered with Base befo
 from app.config import settings
 from app.db.session import Base, SessionLocal, engine
 from app.models.cat import Cat
-from app.routers import auth, cats, claims, exploration, explorer, media, notifications, sightings, users
+from app.routers import (
+    auth,
+    cats,
+    claims,
+    exploration,
+    explorer,
+    media,
+    moderation,
+    notifications,
+    sightings,
+    users,
+)
 from app.services.reconcile import reconcile
 from app.utils.rarity import compute_rarity_score
 
@@ -108,6 +119,19 @@ with engine.connect() as _conn:
         if _e_cols and "cat_id" not in _e_cols:
             _conn.execute(_text("ALTER TABLE explorer_posts ADD COLUMN cat_id INTEGER REFERENCES cats(id)"))
             _conn.commit()
+        if _e_cols and "hidden_at" not in _e_cols:
+            _conn.execute(_text("ALTER TABLE explorer_posts ADD COLUMN hidden_at DATETIME"))
+            _conn.commit()
+        if _e_cols and "hidden_reason" not in _e_cols:
+            _conn.execute(_text("ALTER TABLE explorer_posts ADD COLUMN hidden_reason TEXT"))
+            _conn.commit()
+        _rep_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(post_reports)")).fetchall()]
+        if _rep_cols and "reviewed_at" not in _rep_cols:
+            _conn.execute(_text("ALTER TABLE post_reports ADD COLUMN reviewed_at DATETIME"))
+            _conn.commit()
+        if _rep_cols and "reviewed_by_id" not in _rep_cols:
+            _conn.execute(_text("ALTER TABLE post_reports ADD COLUMN reviewed_by_id INTEGER REFERENCES users(id)"))
+            _conn.commit()
         _et_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(explored_tiles)")).fetchall()]
         if _et_cols and "is_home" not in _et_cols:
             _conn.execute(_text("ALTER TABLE explored_tiles ADD COLUMN is_home BOOLEAN NOT NULL DEFAULT 0"))
@@ -182,6 +206,22 @@ with engine.connect() as _conn:
         _conn.commit()
         _conn.execute(_text(
             "ALTER TABLE password_resets ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE explorer_posts ADD COLUMN IF NOT EXISTS hidden_at TIMESTAMP"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE explorer_posts ADD COLUMN IF NOT EXISTS hidden_reason TEXT"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE post_reports ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMP"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE post_reports ADD COLUMN IF NOT EXISTS reviewed_by_id INTEGER REFERENCES users(id)"
         ))
         _conn.commit()
     # Cat follows were removed (claiming a cat is the only per-cat notification
@@ -313,6 +353,7 @@ app.include_router(claims.router)
 app.include_router(notifications.router)
 app.include_router(cats.router)
 app.include_router(explorer.router)
+app.include_router(moderation.router)
 app.include_router(exploration.router)
 app.include_router(users.router)
 

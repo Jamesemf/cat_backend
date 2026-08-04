@@ -6,7 +6,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
-from app.models.cat import Cat
 from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
 from app.models.notification import Notification
 from app.models.sighting import Sighting
@@ -20,11 +19,8 @@ from app.schemas.explorer import (
     ReportCreate,
 )
 from app.services.auth_service import get_current_user, get_optional_user
-from app.services.content_deletion import (
-    delete_post_dependents,
-    recompute_cat_after_sighting_removal,
-    safe_unlink,
-)
+from app.services.content_deletion import purge_post, safe_unlink
+from app.services.moderation import apply_report_threshold
 from app.services.push import push_to_user
 
 log = logging.getLogger(__name__)
@@ -86,6 +82,7 @@ def _serialize_posts(
                 comment_count=comment_counts.get(p.id, 0),
                 meowed_by_me=p.id in my_meows,
                 is_mine=current_user is not None and p.user_id == current_user.id,
+                hidden=p.hidden_at is not None,
             )
         )
     return out
@@ -99,11 +96,38 @@ def _post_query(db: Session):
     )
 
 
+def _visible(query, current_user: User | None):
+    """Drop moderated-away posts. Admins see everything so they can review in
+    place; the author keeps seeing their own hidden post (flagged as hidden)
+    rather than watching it vanish with no explanation."""
+    if current_user is not None and current_user.is_admin:
+        return query
+    if current_user is not None:
+        return query.filter(
+            or_(ExplorerPost.hidden_at.is_(None), ExplorerPost.user_id == current_user.id)
+        )
+    return query.filter(ExplorerPost.hidden_at.is_(None))
+
+
 def _get_post_or_404(db: Session, post_id: int) -> ExplorerPost:
     post = db.query(ExplorerPost).filter(ExplorerPost.id == post_id).first()
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
     return post
+
+
+def _can_see(post: ExplorerPost, user: User | None) -> bool:
+    """Row-level counterpart to _visible, for single-post lookups."""
+    if post.hidden_at is None:
+        return True
+    return user is not None and (user.is_admin or post.user_id == user.id)
+
+
+def _require_interactable(post: ExplorerPost) -> None:
+    """Block meows and comments on hidden posts — engagement shouldn't keep
+    accruing on content that's been pulled pending review."""
+    if post.hidden_at is not None:
+        raise HTTPException(status_code=403, detail="This post is hidden pending review.")
 
 
 @router.get("/feed", response_model=list[ExplorerPostOut])
@@ -124,7 +148,7 @@ def get_explorer_feed(
     to a cat either via its direct tag or through its originating sighting.
     """
     limit = max(1, min(limit, 30))
-    query = _post_query(db)
+    query = _visible(_post_query(db), current_user)
     if before_id is not None:
         query = query.filter(ExplorerPost.id < before_id)
 
@@ -143,7 +167,7 @@ def get_post(
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ):
-    post = _post_query(db).filter(ExplorerPost.id == post_id).first()
+    post = _visible(_post_query(db), current_user).filter(ExplorerPost.id == post_id).first()
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
     return _serialize_posts(db, [post], current_user)[0]
@@ -157,42 +181,14 @@ def delete_post(
 ):
     """Delete the current user's post, and everything hanging off it.
 
-    Sighting-originated posts also delete the underlying sighting (otherwise
-    the startup backfill would resurrect the post) and repair the cat's
-    counters. Photo files are unlinked only after the commit, and only when
-    no surviving row still references them.
+    Photo files are unlinked only after the commit, and only when no surviving
+    row still references them (see content_deletion.purge_post).
     """
     post = _get_post_or_404(db, post_id)
     if post.user_id is None or post.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="You can only delete your own posts.")
 
-    files_to_unlink: list[str] = []
-    delete_post_dependents(db, [post.id])
-
-    if post.sighting_id is not None:
-        sighting = db.query(Sighting).filter(Sighting.id == post.sighting_id).first()
-        db.delete(post)
-        if sighting:
-            db.query(Notification).filter(Notification.sighting_id == sighting.id).delete(
-                synchronize_session=False
-            )
-            cat = sighting.cat
-            files_to_unlink.append(sighting.photo_path)
-            db.delete(sighting)
-            db.flush()
-            if cat:
-                files_to_unlink.extend(
-                    recompute_cat_after_sighting_removal(db, cat, sighting.photo_path)
-                )
-    else:
-        # Direct upload: the post owns its photo. The "my new cat" flow may
-        # have set it as the cat's profile photo — clear that reference.
-        db.query(Cat).filter(Cat.last_photo_path == post.photo_path).update(
-            {Cat.last_photo_path: None}, synchronize_session=False
-        )
-        files_to_unlink.append(post.photo_path)
-        db.delete(post)
-
+    files_to_unlink = purge_post(db, post)
     db.commit()
     safe_unlink(db, files_to_unlink)
 
@@ -205,7 +201,12 @@ def report_post(
     current_user: User = Depends(get_current_user),
 ):
     """File a report against a post. Idempotent per user — repeat reports
-    return success without creating another row."""
+    return success without creating another row.
+
+    Enough distinct reports hide the post pending moderator review; the
+    response doesn't say so, since confirming the threshold was reached would
+    tell a brigade exactly how many accounts they need.
+    """
     post = _get_post_or_404(db, post_id)
     if body.reason not in REPORT_REASONS:
         raise HTTPException(status_code=400, detail="Unknown report reason.")
@@ -224,6 +225,8 @@ def report_post(
         db.commit()
     except IntegrityError:
         db.rollback()  # already reported by this user — treat as success
+
+    apply_report_threshold(db, post)
     return {"status": "reported"}
 
 
@@ -236,6 +239,7 @@ def toggle_meow(
 ):
     """Toggle the current user's meow on a post."""
     post = _get_post_or_404(db, post_id)
+    _require_interactable(post)
 
     existing = (
         db.query(PostMeow)
@@ -288,6 +292,8 @@ def list_comments(
     current_user: User | None = Depends(get_optional_user),
 ):
     post = _get_post_or_404(db, post_id)
+    if not _can_see(post, current_user):
+        raise HTTPException(status_code=404, detail="Post not found")
     rows = (
         db.query(PostComment)
         .options(joinedload(PostComment.user))
@@ -346,6 +352,7 @@ def create_comment(
     current_user: User = Depends(get_current_user),
 ):
     post = _get_post_or_404(db, post_id)
+    _require_interactable(post)
 
     comment = PostComment(post_id=post_id, user_id=current_user.id, body=body.body.strip())
     db.add(comment)
