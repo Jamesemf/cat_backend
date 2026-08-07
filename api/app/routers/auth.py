@@ -487,10 +487,20 @@ def delete_me(
     )
     db.query(ExploredTile).filter(ExploredTile.user_id == uid).delete(synchronize_session=False)
 
+    # A departing moderator's claim decisions stand too, same as their report
+    # decisions above — without this the FK points at a deleted user row.
+    db.query(CatClaim).filter(CatClaim.reviewed_by_id == uid).update(
+        {CatClaim.reviewed_by_id: None}, synchronize_session=False
+    )
+
     # 4. Claims (all statuses) and their evidence photos. Verified claims
-    #    vanish, so those cats become claimable again.
+    #    vanish, so those cats become claimable again; pending ones simply leave
+    #    the review queue, which is the right outcome — there's nobody left to
+    #    grant ownership to.
     claims = db.query(CatClaim).filter(CatClaim.user_id == uid).all()
-    claimed_cat_ids = {c.cat_id for c in claims}
+    # A pending registration has no cat yet, so filter the nulls out before the
+    # orphan sweep below tries to look them up.
+    claimed_cat_ids = {c.cat_id for c in claims if c.cat_id is not None}
     claim_ids = [c.id for c in claims]
     if claim_ids:
         files_to_unlink.extend(

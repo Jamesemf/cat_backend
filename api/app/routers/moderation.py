@@ -1,12 +1,11 @@
-"""The moderator side of reporting: a review queue and the actions on it.
+"""The moderator side of the app: two review queues and the actions on them.
 
 Every endpoint here is admin-only (is_admin, set directly in the DB — same gate
-as catalog maintenance). Reports arrive from users via
-POST /explorer/posts/{id}/report; enough of them auto-hide a post
-(services/moderation.py). This router is where a human resolves what that
-produced.
+as catalog maintenance).
 
-The three outcomes, and why they're distinct:
+**Reported posts.** Reports arrive from users via POST /explorer/posts/{id}/report;
+enough of them auto-hide a post (services/moderation.py). The three outcomes,
+and why they're distinct:
 
   * dismiss  — the reports were wrong. Unhides, marks them reviewed. The post
                needs AUTO_HIDE_REPORT_COUNT *new* reporters to hide again.
@@ -17,18 +16,37 @@ The three outcomes, and why they're distinct:
                the file. Not reversible.
 
 Resolving a post always marks its open reports reviewed, so the queue drains.
+
+**Ownership claims.** Nothing grants ownership of a cat except approve() below.
+Claims and registrations both land as pending (routers/claims.py,
+routers/cats.py) and wait here. The asymmetry with reports is deliberate: a
+report queue exists to *release* content the machine withheld, whereas this
+queue exists to *withhold* a grant until a person makes it. Ownership carries a
+standing feed of where a real animal is being seen, so it is not something a
+similarity score should hand out.
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
+from app.models.cat import Cat
+from app.models.claim import CatClaim, ClaimPhoto
 from app.models.explorer import ExplorerPost, PostReport
+from app.models.notification import Notification
 from app.models.user import User
+from app.schemas.claim import (
+    ClaimPhotoOut,
+    ClaimQueueItem,
+    ClaimReviewResult,
+    RejectClaimIn,
+)
 from app.schemas.explorer import (
     ModerationActionResult,
     ReportedPostOut,
@@ -38,9 +56,22 @@ from app.routers.media import serve_upload
 from app.services.auth_service import require_admin
 from app.services.content_deletion import purge_post, safe_unlink
 from app.services.moderation import open_report_count
+from app.services.push import push_to_user
 from app.services.storage import UPLOADS_PREFIX
 
 log = logging.getLogger(__name__)
+
+# The seven controlled-vocabulary fields the reviewer compares by eye. Same set
+# utils.matching weights for sighting Re-ID — but here they are shown, not scored.
+COMPARED_FEATURES = (
+    "primary_color",
+    "secondary_color",
+    "pattern",
+    "fur_length",
+    "eye_color",
+    "body_size",
+    "breed",
+)
 
 router = APIRouter(prefix="/moderation", tags=["moderation"])
 
@@ -252,3 +283,372 @@ def remove_post(
     db.commit()
     safe_unlink(db, files_to_unlink)
     log.warning("Post %s removed by moderator %s (author=%s)", post_id, admin.id, author_id)
+
+
+# --------------------------------------------------------------------------
+# Ownership claims
+# --------------------------------------------------------------------------
+
+
+def _get_claim_or_404(db: Session, claim_id: int) -> CatClaim:
+    """Load a claim for review.
+
+    404 rather than 500 when it's gone: deleting an account removes its claims,
+    and deleting a cat removes the claims against it, so a queue page held open
+    can easily name a row that no longer exists.
+    """
+    claim = (
+        db.query(CatClaim)
+        .options(joinedload(CatClaim.cat), joinedload(CatClaim.user))
+        .filter(CatClaim.id == claim_id)
+        .first()
+    )
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    return claim
+
+
+def _features_of(raw: str | None) -> dict:
+    """The compared subset of a stored features_json blob, tolerating junk."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {k: parsed.get(k) for k in COMPARED_FEATURES}
+
+
+def _queue_item(db: Session, claim: CatClaim) -> ClaimQueueItem:
+    photos = (
+        db.query(ClaimPhoto)
+        .filter(ClaimPhoto.claim_id == claim.id)
+        .order_by(ClaimPhoto.id.asc())
+        .all()
+    )
+    cat = claim.cat
+    return ClaimQueueItem(
+        claim_id=claim.id,
+        source=claim.source,
+        status=claim.status,
+        created_at=claim.created_at,
+        decided_at=claim.decided_at,
+        claimant_id=claim.user_id,
+        claimant_name=claim.user.display_name if claim.user else None,
+        # Surfaced for the same reason ReportedPostOut carries author_strikes:
+        # a history of harmful uploads is context for whether to trust a claim.
+        claimant_strikes=claim.user.content_strikes if claim.user else 0,
+        claimant_banned=bool(claim.user and claim.user.banned_at is not None),
+        cat_id=claim.cat_id,
+        cat_name=cat.name if cat else None,
+        cat_photo_path=cat.last_photo_path if cat else None,
+        cat_sighting_count=cat.sighting_count if cat else None,
+        cat_features={k: getattr(cat, k, None) for k in COMPARED_FEATURES} if cat else {},
+        proposed_name=claim.real_name,
+        likes_petting=claim.likes_petting,
+        accepts_treats=claim.accepts_treats,
+        age_years=claim.age_years,
+        fun_fact=claim.fun_fact,
+        indoor_outdoor=claim.indoor_outdoor,
+        photos=[
+            ClaimPhotoOut(
+                id=p.id,
+                photo_path=p.photo_path,
+                features=_features_of(p.features_json),
+            )
+            for p in photos
+        ],
+        rejection_reason=claim.rejection_reason,
+        reviewed_by_name=claim.reviewed_by.display_name if claim.reviewed_by else None,
+    )
+
+
+@router.get("/claims", response_model=list[ClaimQueueItem])
+def list_claims(
+    limit: int = 50,
+    offset: int = 0,
+    include_resolved: bool = False,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """The claim review queue, oldest first.
+
+    Oldest-first rather than the report queue's worst-first: there is no
+    severity here, only someone waiting. A claim that has been pending two days
+    should be decided before one filed this morning, because nothing about their
+    cat works until it is.
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    q = db.query(CatClaim).options(
+        joinedload(CatClaim.cat),
+        joinedload(CatClaim.user),
+        joinedload(CatClaim.reviewed_by),
+    )
+    if include_resolved:
+        # "Everything a moderator has or could have touched" — self-revoked and
+        # never-reviewed rows are noise in a history view.
+        q = q.filter(CatClaim.status.in_(("pending", "verified", "rejected", "revoked")))
+    else:
+        q = q.filter(CatClaim.status == "pending")
+
+    rows = q.order_by(CatClaim.created_at.asc()).offset(offset).limit(limit).all()
+
+    out: list[ClaimQueueItem] = []
+    for claim in rows:
+        # A claim on a cat that has since been deleted has nothing to judge —
+        # mirrors the reports queue skipping posts deleted out from under them.
+        if claim.source == "claim" and claim.cat is None:
+            continue
+        out.append(_queue_item(db, claim))
+    return out
+
+
+@router.post("/claims/{claim_id}/approve", response_model=ClaimReviewResult)
+def approve_claim(
+    claim_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Grant ownership. The only path in the codebase that does.
+
+    For a registration this is also where the Cat is finally created, from the
+    photos and vision features held against the claim.
+    """
+    claim = _get_claim_or_404(db, claim_id)
+    if claim.status != "pending":
+        raise HTTPException(
+            status_code=409, detail=f"This claim was already {claim.status}."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if claim.source == "register":
+        photos = (
+            db.query(ClaimPhoto)
+            .filter(ClaimPhoto.claim_id == claim.id)
+            .order_by(ClaimPhoto.id.asc())
+            .all()
+        )
+        if not photos:
+            raise HTTPException(
+                status_code=409,
+                detail="This registration has no photos left; reject it instead.",
+            )
+        cover = photos[0]
+        feats = _features_of(cover.features_json)
+        cat = Cat(
+            name=claim.real_name,
+            breed=feats.get("breed"),
+            last_photo_path=cover.photo_path,
+            sighting_count=0,
+            rarity_score=0.0,
+            first_seen=now,
+            last_seen=now,
+            is_cat=True,
+            primary_color=feats.get("primary_color"),
+            secondary_color=feats.get("secondary_color"),
+            pattern=feats.get("pattern"),
+            fur_length=feats.get("fur_length"),
+            eye_color=feats.get("eye_color"),
+            body_size=feats.get("body_size"),
+            features_json=cover.features_json,
+        )
+        db.add(cat)
+        db.flush()
+        claim.cat_id = cat.id
+    else:
+        cat = claim.cat
+        if cat is None:
+            raise HTTPException(status_code=404, detail="That cat no longer exists.")
+        # Re-check rather than trusting the partial unique index: a database
+        # created before that index existed won't have it (create_all skips
+        # pre-existing tables), so this is the only guaranteed guard.
+        rival = (
+            db.query(CatClaim)
+            .filter(
+                CatClaim.cat_id == cat.id,
+                CatClaim.status == "verified",
+                CatClaim.id != claim.id,
+            )
+            .first()
+        )
+        if rival:
+            raise HTTPException(
+                status_code=409, detail="This cat already has a verified owner."
+            )
+        # The owner knows the cat's actual name: it replaces the generated nickname.
+        if claim.real_name:
+            cat.name = claim.real_name
+
+    claim.status = "verified"
+    claim.reviewed_by_id = admin.id
+    claim.decided_at = now
+
+    # Rival claims on the same cat can't all be right, and leaving them pending
+    # would show the next moderator a decision that is already made.
+    losers = (
+        db.query(CatClaim)
+        .filter(
+            CatClaim.cat_id == claim.cat_id,
+            CatClaim.status == "pending",
+            CatClaim.id != claim.id,
+        )
+        .all()
+    )
+    cat_label = cat.name or "this cat"
+    pushes: list[tuple[int, str, str]] = []
+    for loser in losers:
+        loser.status = "rejected"
+        loser.reviewed_by_id = admin.id
+        loser.decided_at = now
+        loser.rejection_reason = "Someone else was confirmed as this cat's owner."
+        title = f"Your claim on {cat_label} wasn't approved"
+        body = "Someone else was confirmed as this cat's owner."
+        db.add(
+            Notification(
+                user_id=loser.user_id,
+                type="claim_rejected",
+                title=title,
+                body=body,
+                cat_id=claim.cat_id,
+            )
+        )
+        pushes.append((loser.user_id, title, body))
+
+    win_title = f"You're now {cat_label}'s verified owner"
+    win_body = "Your claim was approved. You'll be notified whenever they're spotted."
+    db.add(
+        Notification(
+            user_id=claim.user_id,
+            type="claim_verified",
+            title=win_title,
+            body=win_body,
+            cat_id=claim.cat_id,
+        )
+    )
+    pushes.append((claim.user_id, win_title, win_body))
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost a race with a simultaneous approval on the same cat.
+        db.rollback()
+        raise HTTPException(status_code=409, detail="This cat already has a verified owner.")
+
+    # Only once the decision is durable. Pushing first would tell a claimant
+    # they own a cat that a rolled-back commit never gave them.
+    cat_id = claim.cat_id
+    for uid, title, body in pushes:
+        background_tasks.add_task(push_to_user, uid, title, body, {"cat_id": cat_id})
+
+    log.info(
+        "Claim %s (%s) approved by moderator %s — cat %s, %d rival(s) rejected",
+        claim.id, claim.source, admin.id, cat_id, len(losers),
+    )
+    return ClaimReviewResult(claim_id=claim.id, status=claim.status, cat_id=cat_id)
+
+
+@router.post("/claims/{claim_id}/reject", response_model=ClaimReviewResult)
+def reject_claim(
+    claim_id: int,
+    body: RejectClaimIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Turn a claim down. Nothing is deleted.
+
+    A rejected registration leaves no cat behind because approval is what would
+    have created one. The claim row itself is kept deliberately — the retry
+    cooldown and the daily attempt cap are both computed by counting rows, so
+    deleting it would hand the claimant a fresh budget and let them resubmit in
+    a loop.
+    """
+    claim = _get_claim_or_404(db, claim_id)
+    if claim.status != "pending":
+        raise HTTPException(
+            status_code=409, detail=f"This claim was already {claim.status}."
+        )
+
+    reason = (body.reason or "").strip() or "Your photos weren't enough to confirm this is your cat."
+    cat_label = claim.cat.name if claim.cat else (claim.real_name or "this cat")
+
+    claim.status = "rejected"
+    claim.rejection_reason = reason
+    claim.reviewed_by_id = admin.id
+    claim.decided_at = datetime.now(timezone.utc)
+
+    title = f"Your claim on {cat_label} wasn't approved"
+    db.add(
+        Notification(
+            user_id=claim.user_id,
+            type="claim_rejected",
+            title=title,
+            body=reason,
+            # Null for a registration: no cat was ever created, so there is
+            # nowhere for the notification to deep-link to.
+            cat_id=claim.cat_id,
+        )
+    )
+    db.commit()
+
+    background_tasks.add_task(
+        push_to_user, claim.user_id, title, reason, {"cat_id": claim.cat_id}
+    )
+    log.info("Claim %s (%s) rejected by moderator %s", claim.id, claim.source, admin.id)
+    return ClaimReviewResult(claim_id=claim.id, status=claim.status, cat_id=claim.cat_id)
+
+
+@router.post("/claims/{claim_id}/revoke", response_model=ClaimReviewResult)
+def revoke_claim(
+    claim_id: int,
+    body: RejectClaimIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Take ownership back off someone who already has it.
+
+    The cat keeps whatever name the approval gave it — the nickname it had
+    before was generated, and other people have been seeing this one since.
+    Rename it by hand if the revocation was for a bogus name.
+    """
+    claim = _get_claim_or_404(db, claim_id)
+    if claim.status != "verified":
+        raise HTTPException(
+            status_code=409, detail=f"This claim is {claim.status}, not verified."
+        )
+
+    reason = (body.reason or "").strip() or "Your ownership of this cat has been removed."
+    cat_label = claim.cat.name if claim.cat else "this cat"
+
+    claim.status = "revoked"
+    claim.rejection_reason = reason
+    claim.reviewed_by_id = admin.id
+    claim.decided_at = datetime.now(timezone.utc)
+
+    title = f"You're no longer {cat_label}'s verified owner"
+    db.add(
+        Notification(
+            user_id=claim.user_id,
+            type="claim_revoked",
+            title=title,
+            body=reason,
+            cat_id=claim.cat_id,
+        )
+    )
+    db.commit()
+
+    background_tasks.add_task(
+        push_to_user, claim.user_id, title, reason, {"cat_id": claim.cat_id}
+    )
+    log.warning(
+        "Claim %s revoked by moderator %s (was owned by user %s)",
+        claim.id, admin.id, claim.user_id,
+    )
+    return ClaimReviewResult(claim_id=claim.id, status=claim.status, cat_id=claim.cat_id)

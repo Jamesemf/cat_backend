@@ -2,7 +2,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
@@ -23,10 +22,11 @@ from app.services.auth_service import get_current_user, get_optional_user
 from app.services.claim_verification import (
     CLAIM_COOLDOWN_HOURS,
     MAX_CLAIM_ATTEMPTS_PER_DAY,
+    MAX_OPEN_PENDING_CLAIMS,
     MAX_PHOTOS,
     MIN_PHOTOS,
     analyze_claim_photos,
-    decide_claim,
+    invalid_photo_reason,
 )
 from app.services.moderation import register_content_strike
 from app.services.storage import UPLOADS_PREFIX, get_storage
@@ -88,8 +88,10 @@ async def submit_claim(
 ):
     """Claim a cat by submitting 2-3 photos plus the owner card.
 
-    Photos are scored against the cat's stored vision features; the claim is
-    verified or rejected synchronously (a few seconds of vision calls).
+    Grants nothing. The claim is recorded as pending and waits for a moderator
+    to approve or reject it in /moderation/claims — photos are run through
+    vision on the way in only to catch harmful content, to check there's a
+    single cat in frame, and to record what vision saw for the reviewer.
     """
     cat = db.query(Cat).filter(Cat.id == cat_id).first()
     if not cat:
@@ -118,6 +120,38 @@ async def submit_claim(
             else "This cat already has a verified owner."
         )
         raise HTTPException(status_code=409, detail=detail)
+
+    # A pending claim has no decided_at, so the rejection cooldown below can't
+    # see it. Without this guard the same person could stack claims on one cat
+    # and hand the moderator the same decision several times over.
+    already_pending = (
+        db.query(CatClaim)
+        .filter(
+            CatClaim.cat_id == cat_id,
+            CatClaim.user_id == current_user.id,
+            CatClaim.status == "pending",
+        )
+        .first()
+    )
+    if already_pending:
+        raise HTTPException(
+            status_code=409,
+            detail="You've already claimed this cat. We're reviewing it now.",
+        )
+
+    open_pending = (
+        db.query(CatClaim)
+        .filter(CatClaim.user_id == current_user.id, CatClaim.status == "pending")
+        .count()
+    )
+    if open_pending >= MAX_OPEN_PENDING_CLAIMS:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"You have {open_pending} claims awaiting review. "
+                "Wait for those to be decided before claiming another cat."
+            ),
+        )
 
     now = datetime.now(timezone.utc)
     # decided_at / created_at are stored naive-UTC, so compare against naive-UTC
@@ -191,14 +225,22 @@ async def submit_claim(
         detail = register_content_strike(db, current_user, flagged.inappropriate_reason)
         raise HTTPException(status_code=400, detail=detail)
 
-    decision = decide_claim(photo_features, cat)
+    # Not a judgement on ownership — just whether there's a single cat to look
+    # at. Drop the files, as the strike path above does, or every mis-aimed
+    # camera leaves uploads behind for the reconcile sweep to find.
+    invalid = invalid_photo_reason(photo_features)
+    if invalid is not None:
+        for p in saved_paths:
+            storage.delete(p)
+        raise HTTPException(status_code=400, detail=invalid)
 
+    # Nothing is granted here. The claim joins the moderation queue and a person
+    # decides; see routers/moderation.py.
     claim = CatClaim(
         cat_id=cat_id,
         user_id=current_user.id,
-        status="verified" if decision.verified else "rejected",
-        avg_confidence=decision.avg_confidence,
-        rejection_reason=decision.reason,
+        status="pending",
+        source="claim",
         real_name=real_name,
         likes_petting=likes_petting,
         accepts_treats=accepts_treats,
@@ -206,67 +248,37 @@ async def submit_claim(
         fun_fact=fun_fact,
         indoor_outdoor=indoor_outdoor,
         created_at=now,
-        decided_at=datetime.now(timezone.utc),
+        decided_at=None,
     )
     db.add(claim)
-    try:
-        db.flush()
-    except IntegrityError:
-        # Lost a race with a simultaneous verified claim on the same cat.
-        db.rollback()
-        raise HTTPException(status_code=409, detail="This cat already has a verified owner.")
+    db.flush()
 
-    # Per-photo scores exist only for photos the decision reached before any
-    # early rejection; align by index and leave the rest None.
-    for i, (path, features) in enumerate(zip(saved_paths, photo_features)):
+    for path, features in zip(saved_paths, photo_features):
         db.add(
             ClaimPhoto(
                 claim_id=claim.id,
                 photo_path=path,
-                confidence=decision.per_photo[i] if i < len(decision.per_photo) else None,
                 features_json=features.to_json(),
             )
         )
 
-    if decision.verified:
-        # The owner knows the cat's actual name: it replaces the generated nickname.
-        if real_name:
-            cat.name = real_name
-        db.add(
-            Notification(
-                user_id=current_user.id,
-                type="claim_verified",
-                title=f"You're now {cat.name or 'your cat'}'s verified owner",
-                body="Your photos matched. You'll be notified whenever they're spotted.",
-                cat_id=cat.id,
-            )
+    # Inbox-only, no push: the user is looking at the result screen right now.
+    # The decision itself pushes, because by then they're long gone.
+    db.add(
+        Notification(
+            user_id=current_user.id,
+            type="claim_pending",
+            title=f"Your claim on {cat.name or 'this cat'} is being reviewed",
+            body=(
+                "Someone will check your photos and confirm they're your cat. "
+                "We'll let you know as soon as it's decided."
+            ),
+            cat_id=cat.id,
         )
-    else:
-        # The result screen shows the rejection immediately; this row keeps a
-        # record in the inbox (with the reason) after that screen is dismissed.
-        db.add(
-            Notification(
-                user_id=current_user.id,
-                type="claim_rejected",
-                title=f"Claim on {cat.name or 'this cat'} wasn't verified",
-                body=decision.reason
-                or "Your photos didn't match this cat closely enough. You can try again later.",
-                cat_id=cat.id,
-            )
-        )
-
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="This cat already has a verified owner.")
-
-    return ClaimResult(
-        status=claim.status,
-        avg_confidence=decision.avg_confidence,
-        per_photo_confidences=decision.per_photo,
-        rejection_reason=decision.reason,
     )
+    db.commit()
+
+    return ClaimResult(status=claim.status)
 
 
 @router.get("/cats/{cat_id}/claim", response_model=ClaimStatusResponse)
@@ -374,12 +386,28 @@ def my_claims(
         .order_by(CatClaim.created_at.desc())
         .all()
     )
+
+    # A pending registration has no cat to read from, so it falls back to what
+    # the claimant told us and to their own evidence photo — otherwise a cat
+    # they just registered would show up nameless and blank while it waits.
+    pending_covers: dict[int, str] = {}
+    awaiting = [c.id for c in claims if c.cat_id is None]
+    if awaiting:
+        for claim_id, path in (
+            db.query(ClaimPhoto.claim_id, ClaimPhoto.photo_path)
+            .filter(ClaimPhoto.claim_id.in_(awaiting))
+            .order_by(ClaimPhoto.id.asc())
+            .all()
+        ):
+            pending_covers.setdefault(claim_id, path)
+
     return [
         MyClaimItem(
             **ClaimOut.model_validate(c).model_dump(),
-            cat_name=c.cat.name if c.cat else None,
-            cat_photo_path=c.cat.last_photo_path if c.cat else None,
+            cat_name=c.cat.name if c.cat else c.real_name,
+            cat_photo_path=c.cat.last_photo_path if c.cat else pending_covers.get(c.id),
             cat_rarity_score=c.cat.rarity_score if c.cat else None,
+            source=c.source,
         )
         for c in claims
     ]

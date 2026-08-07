@@ -107,10 +107,76 @@ with engine.connect() as _conn:
         if _pr_cols and "attempts" not in _pr_cols:
             _conn.execute(_text("ALTER TABLE password_resets ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"))
             _conn.commit()
-        _c_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(cat_claims)")).fetchall()]
+        _c_info = _conn.execute(_text("PRAGMA table_info(cat_claims)")).fetchall()
+        _c_cols = [r[1] for r in _c_info]
         if _c_cols and "real_name" not in _c_cols:
             _conn.execute(_text("ALTER TABLE cat_claims ADD COLUMN real_name TEXT"))
             _conn.commit()
+        if _c_cols and "reviewed_by_id" not in _c_cols:
+            _conn.execute(_text("ALTER TABLE cat_claims ADD COLUMN reviewed_by_id INTEGER REFERENCES users(id)"))
+            _conn.commit()
+        if _c_cols and "source" not in _c_cols:
+            _conn.execute(_text("ALTER TABLE cat_claims ADD COLUMN source TEXT NOT NULL DEFAULT 'claim'"))
+            _conn.commit()
+        # cat_id became nullable (a pending registration has no cat until it is
+        # approved). SQLite has no ALTER COLUMN, so this is the documented
+        # 12-step rebuild, guarded so it runs at most once. PRAGMA table_info
+        # rows are (cid, name, type, notnull, dflt_value, pk).
+        # The rebuilt table drops avg_confidence on the way through: claims are
+        # no longer scored, so there is no number to carry over.
+        _cat_id_notnull = next((r[3] for r in _c_info if r[1] == "cat_id"), 0)
+        if _c_info and _cat_id_notnull:
+            _conn.execute(_text("PRAGMA foreign_keys=OFF"))
+            _conn.execute(_text("""
+                CREATE TABLE cat_claims_new (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    cat_id INTEGER REFERENCES cats(id),
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    status VARCHAR,
+                    source VARCHAR NOT NULL DEFAULT 'claim',
+                    rejection_reason TEXT,
+                    reviewed_by_id INTEGER REFERENCES users(id),
+                    real_name VARCHAR,
+                    likes_petting BOOLEAN,
+                    accepts_treats BOOLEAN,
+                    age_years INTEGER,
+                    fun_fact TEXT,
+                    indoor_outdoor VARCHAR,
+                    created_at DATETIME,
+                    decided_at DATETIME
+                )
+            """))
+            _conn.execute(_text("""
+                INSERT INTO cat_claims_new (
+                    id, cat_id, user_id, status, source, rejection_reason,
+                    reviewed_by_id, real_name, likes_petting, accepts_treats, age_years,
+                    fun_fact, indoor_outdoor, created_at, decided_at
+                )
+                SELECT id, cat_id, user_id, status, source, rejection_reason,
+                       reviewed_by_id, real_name, likes_petting, accepts_treats, age_years,
+                       fun_fact, indoor_outdoor, created_at, decided_at
+                FROM cat_claims
+            """))
+            _conn.execute(_text("DROP TABLE cat_claims"))
+            _conn.execute(_text("ALTER TABLE cat_claims_new RENAME TO cat_claims"))
+            _conn.execute(_text("CREATE INDEX IF NOT EXISTS ix_cat_claims_cat_id ON cat_claims (cat_id)"))
+            _conn.execute(_text("CREATE INDEX IF NOT EXISTS ix_cat_claims_user_id ON cat_claims (user_id)"))
+            _conn.execute(_text("CREATE INDEX IF NOT EXISTS ix_cat_claims_status ON cat_claims (status)"))
+            _conn.commit()
+            _conn.execute(_text("PRAGMA foreign_keys=ON"))
+        # Databases that already went through the rebuild above (or that never
+        # needed it) still carry the scoring columns. DROP COLUMN needs SQLite
+        # >= 3.35; older dev machines just leave them behind, inert.
+        import sqlite3 as _sqlite3_claims
+        if _sqlite3_claims.sqlite_version_info >= (3, 35, 0):
+            _c_now = [r[1] for r in _conn.execute(_text("PRAGMA table_info(cat_claims)")).fetchall()]
+            if "avg_confidence" in _c_now:
+                _conn.execute(_text("ALTER TABLE cat_claims DROP COLUMN avg_confidence"))
+                _conn.commit()
+            _cp_now = [r[1] for r in _conn.execute(_text("PRAGMA table_info(claim_photos)")).fetchall()]
+            if "confidence" in _cp_now:
+                _conn.execute(_text("ALTER TABLE claim_photos DROP COLUMN confidence"))
+                _conn.commit()
         _n_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(notifications)")).fetchall()]
         if _n_cols and "post_id" not in _n_cols:
             _conn.execute(_text("ALTER TABLE notifications ADD COLUMN post_id INTEGER REFERENCES explorer_posts(id)"))
@@ -224,6 +290,26 @@ with engine.connect() as _conn:
             "ALTER TABLE post_reports ADD COLUMN IF NOT EXISTS reviewed_by_id INTEGER REFERENCES users(id)"
         ))
         _conn.commit()
+        # cat_claims had no Postgres statements at all until claims moved to
+        # human review, so the owner-card columns are patched in here too —
+        # IF NOT EXISTS makes that free where they already exist.
+        for _stmt in (
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS real_name VARCHAR",
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS likes_petting BOOLEAN",
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS accepts_treats BOOLEAN",
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS age_years INTEGER",
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS fun_fact TEXT",
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS indoor_outdoor VARCHAR",
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS reviewed_by_id INTEGER REFERENCES users(id)",
+            "ALTER TABLE cat_claims ADD COLUMN IF NOT EXISTS source VARCHAR NOT NULL DEFAULT 'claim'",
+            # A pending registration has no cat until it is approved.
+            "ALTER TABLE cat_claims ALTER COLUMN cat_id DROP NOT NULL",
+            # Claims aren't scored any more, so the stored scores go too.
+            "ALTER TABLE cat_claims DROP COLUMN IF EXISTS avg_confidence",
+            "ALTER TABLE claim_photos DROP COLUMN IF EXISTS confidence",
+        ):
+            _conn.execute(_text(_stmt))
+            _conn.commit()
     # Cat follows were removed (claiming a cat is the only per-cat notification
     # subscription), so sweep the orphaned table off existing databases.
     # Standard SQL, both dialects, idempotent.
@@ -236,6 +322,25 @@ with engine.connect() as _conn:
         "CREATE INDEX IF NOT EXISTS ix_explored_tiles_tile_key ON explored_tiles (tile_key)"
     ))
     _conn.commit()
+    # Same story for the one-verified-owner-per-cat constraint: it's declared on
+    # the model, but create_all skips pre-existing tables, so a database created
+    # before it was added has no such index. Approving a claim re-checks in
+    # Python as well — this is the backstop against two moderators approving
+    # rival claims at the same instant. Partial-index syntax is valid on both
+    # dialects. If existing data already violates it the CREATE fails; log and
+    # carry on rather than making the service unbootable over it.
+    try:
+        _conn.execute(_text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_one_verified_claim_per_cat "
+            "ON cat_claims (cat_id) WHERE status = 'verified'"
+        ))
+        _conn.commit()
+    except Exception:
+        _conn.rollback()
+        log.exception(
+            "Could not create ix_one_verified_claim_per_cat — duplicate verified "
+            "claims likely exist. Approval still re-checks in Python."
+        )
     # Grandfather accounts that predate email verification so enforcing it
     # doesn't lock them out: a pre-feature user has no pending verification code
     # (the table didn't exist when they signed up), so mark them verified. New

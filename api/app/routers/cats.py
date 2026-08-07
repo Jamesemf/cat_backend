@@ -8,7 +8,7 @@ from sqlalchemy import distinct, func
 
 from app.db.session import get_db
 from app.models.cat import Cat
-from app.models.claim import CatClaim
+from app.models.claim import CatClaim, ClaimPhoto
 from app.models.explorer import ExplorerPost
 from app.models.exploration import ExploredTile
 from app.models.notification import Notification
@@ -31,10 +31,15 @@ from app.schemas.cat import (
     TerritoryOut,
     TopCat,
 )
-from app.schemas.claim import INDOOR_OUTDOOR_VALUES
+from app.schemas.claim import INDOOR_OUTDOOR_VALUES, RegisterResult
 from app.services.auth_service import get_current_user, require_admin
 from app.services.catalog import own_cover_photos, parse_covers
-from app.services.claim_verification import MAX_CLAIM_ATTEMPTS_PER_DAY, MAX_PHOTOS
+from app.services.claim_verification import (
+    MAX_CLAIM_ATTEMPTS_PER_DAY,
+    MAX_OPEN_PENDING_CLAIMS,
+    MAX_PHOTOS,
+    invalid_photo_reason,
+)
 from app.services.moderation import register_content_strike, sighting_has_hidden_post
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
@@ -135,7 +140,7 @@ def create_cat(
     return cat
 
 
-@router.post("/register", response_model=CatOut, status_code=201)
+@router.post("/register", response_model=RegisterResult, status_code=201)
 async def register_cat(
     photos: list[UploadFile] = File(...),
     name: str = Form(...),
@@ -147,13 +152,17 @@ async def register_cat(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Register a brand-new cat the user owns.
+    """Propose a brand-new cat you own. Creates no cat by itself.
 
-    Unlike a claim (which matches photos against an existing cat), this creates
-    the cat from the owner's own photo and marks them as its verified owner. The
-    cover photo is run through vision to confirm it's a cat and to seed the cat's
-    visual features, so future sightings by other people can be matched back to
-    this profile. The cat has no sightings yet, so no rarity and no map pin.
+    Registration used to mint a verified owner outright — one photo that looked
+    like a cat and the account owned it. It now joins the same review queue as a
+    claim on an existing cat, as `source="register"`.
+
+    The Cat is built on approval, not here, from the photos held against the
+    claim. Creating it up front would publish an unreviewed, user-named cat: GET
+    /cats is unauthenticated and ordered by last_seen, so a fresh registration
+    would sit at the top of the public catalogue and the onboarding picker
+    before anyone had looked at it.
     """
     name = name.strip()
     if not name or len(name) > 40:
@@ -179,18 +188,35 @@ async def register_cat(
             status_code=429,
             detail=f"Daily limit of {MAX_CLAIM_ATTEMPTS_PER_DAY} claim/registration attempts reached.",
         )
-
-    cover = photos[0]
-    contents = await read_upload_capped(
-        cover,
-        MAX_PHOTO_BYTES,
-        f"Each photo must be under {MAX_PHOTO_BYTES // 1024 // 1024}MB.",
+    open_pending = (
+        db.query(CatClaim)
+        .filter(CatClaim.user_id == current_user.id, CatClaim.status == "pending")
+        .count()
     )
-    # Strip metadata (EXIF/GPS) and pin a safe extension from the decoded format.
-    clean, ext = sanitize_image(contents)
+    if open_pending >= MAX_OPEN_PENDING_CLAIMS:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"You have {open_pending} claims awaiting review. "
+                "Wait for those to be decided before registering another cat."
+            ),
+        )
+
+    # Every photo is kept, not just the cover: registration is the flow with no
+    # existing record to compare against, so the reviewer should have at least
+    # as much to look at as a claim gives them.
+    cleaned: list[tuple[bytes, str]] = []
+    for photo in photos:
+        contents = await read_upload_capped(
+            photo,
+            MAX_PHOTO_BYTES,
+            f"Each photo must be under {MAX_PHOTO_BYTES // 1024 // 1024}MB.",
+        )
+        # Strip metadata (EXIF/GPS) and pin a safe extension from the decoded format.
+        cleaned.append(sanitize_image(contents))
 
     try:
-        features = await analyze_cat_photo(clean)
+        photo_features = [await analyze_cat_photo(clean) for clean, _ in cleaned]
     except VisionError as exc:
         log.warning("Register vision failed: %s", exc)
         raise HTTPException(
@@ -199,69 +225,60 @@ async def register_cat(
         )
 
     # Harmful content earns a strike (two warnings, banned on the third).
-    if not features.is_appropriate:
-        detail = register_content_strike(db, current_user, features.inappropriate_reason)
+    flagged = next((f for f in photo_features if not f.is_appropriate), None)
+    if flagged is not None:
+        detail = register_content_strike(db, current_user, flagged.inappropriate_reason)
         raise HTTPException(status_code=400, detail=detail)
 
-    if not features.is_cat:
-        raise HTTPException(
-            status_code=400,
-            detail="That photo doesn't look like a cat. Try a clear photo of your cat.",
-        )
-    if features.cat_count > 1:
-        raise HTTPException(status_code=400, detail="Please use a photo of just your cat.")
+    invalid = invalid_photo_reason(photo_features)
+    if invalid is not None:
+        raise HTTPException(status_code=400, detail=invalid)
 
-    photo_path = get_storage().put(clean, ext=ext)
+    storage = get_storage()
+    saved_paths = [storage.put(clean, ext=ext) for clean, ext in cleaned]
 
     now = datetime.now(timezone.utc)
-    cat = Cat(
-        name=name,
-        breed=features.breed,
-        last_photo_path=photo_path,
-        sighting_count=0,
-        rarity_score=0.0,
-        first_seen=now,
-        last_seen=now,
-        is_cat=features.is_cat,
-        primary_color=features.primary_color,
-        secondary_color=features.secondary_color,
-        pattern=features.pattern,
-        fur_length=features.fur_length,
-        eye_color=features.eye_color,
-        body_size=features.body_size,
-        features_json=features.to_json(),
+    claim = CatClaim(
+        cat_id=None,
+        user_id=current_user.id,
+        status="pending",
+        source="register",
+        real_name=name,
+        likes_petting=likes_petting,
+        accepts_treats=accepts_treats,
+        age_years=age_years,
+        fun_fact=fun_fact.strip() if fun_fact else None,
+        indoor_outdoor=indoor_outdoor,
+        created_at=now,
+        decided_at=None,
     )
-    db.add(cat)
+    db.add(claim)
     db.flush()
-    db.add(
-        CatClaim(
-            cat_id=cat.id,
-            user_id=current_user.id,
-            status="verified",
-            real_name=name,
-            likes_petting=likes_petting,
-            accepts_treats=accepts_treats,
-            age_years=age_years,
-            fun_fact=fun_fact.strip() if fun_fact else None,
-            indoor_outdoor=indoor_outdoor,
-            created_at=now,
-            decided_at=now,
+
+    # These photos are the evidence *and* the material the Cat is built from on
+    # approval, so the features go on the row rather than being recomputed later.
+    for path, features in zip(saved_paths, photo_features):
+        db.add(
+            ClaimPhoto(
+                claim_id=claim.id,
+                photo_path=path,
+                features_json=features.to_json(),
+            )
         )
-    )
-    # Same inbox record the claim flow leaves — registering makes you the
-    # verified owner directly.
+
     db.add(
         Notification(
             user_id=current_user.id,
-            type="claim_verified",
-            title=f"You're now {cat.name}'s verified owner",
-            body="You'll be notified whenever they're spotted.",
-            cat_id=cat.id,
+            type="claim_pending",
+            title=f"{name}'s profile is being reviewed",
+            body=(
+                "Someone will check your photos before their profile goes live. "
+                "We'll let you know as soon as it's decided."
+            ),
         )
     )
     db.commit()
-    db.refresh(cat)
-    return cat
+    return RegisterResult(claim_id=claim.id, status=claim.status)
 
 
 @router.post("/recompute-rarity", status_code=200)
@@ -316,6 +333,27 @@ def merge_cats(
         raise HTTPException(
             status_code=409,
             detail="Both cats have a verified owner; resolve ownership before merging.",
+        )
+
+    # Pending claims can't be carried across a merge. Reassigning one would put
+    # photos of the source cat in front of a moderator judging them against the
+    # target's record, and if either side is already verified, approving the
+    # moved claim afterwards would collide with it.
+    pending = (
+        db.query(CatClaim)
+        .filter(
+            CatClaim.cat_id.in_((source_id, target_id)),
+            CatClaim.status == "pending",
+        )
+        .count()
+    )
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{pending} claim(s) on these cats are awaiting review; "
+                "decide them in /moderation/claims before merging."
+            ),
         )
 
     # Move sightings, posts and notifications wholesale. Sighting-originated posts
