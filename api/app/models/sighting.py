@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, DateTime, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, backref, mapped_column, relationship
 
 from app.db.session import Base
 
@@ -41,5 +41,19 @@ class Sighting(Base):
     photo_adjust: Mapped[str | None] = mapped_column(Text, nullable=True)
     caption: Mapped[str | None] = mapped_column(String, nullable=True)
 
-    cat  = relationship("Cat",  backref="sightings")
+    # Newest first, so every reader of cat.sightings gets a defined order. Left
+    # to insertion order, the profile's map highlighted the oldest spot as the
+    # most recent and drew its direction gradient backwards.
+    cat  = relationship("Cat",  backref=backref("sightings", order_by="Sighting.spotted_at.desc()"))
     user = relationship("User", foreign_keys=[user_id])
+
+    # spotter_name is denormalised onto the row, but the spotter's id and chosen
+    # emoji live on the user — surfaced here so SightingOut can carry them and
+    # the client can show a real avatar and link to the profile behind it.
+    @property
+    def spotter_id(self) -> int | None:
+        return self.user_id
+
+    @property
+    def spotter_emoji(self) -> str | None:
+        return self.user.avatar_emoji if self.user else None

@@ -329,59 +329,29 @@ def create_sighting(
     return sighting
 
 
-@router.get("/feed", response_model=list[FeedItem])
-def get_feed(
-    lat: float | None = None,
-    lng: float | None = None,
-    radius_km: float = 10.0,
-    limit: int = 30,
-    offset: int = 0,
-    db: Session = Depends(get_db),
-    current_user: User | None = Depends(get_optional_user),
-):
-    """Recent sightings enriched with their cat's name and rarity score.
+def _visible_sightings(query, current_user: User | None):
+    """Drop sightings whose mirrored post was moderated away.
 
-    When lat/lng are provided, only sightings within radius_km are returned.
-    Falls back to the global feed when location is unavailable. Each item also
-    carries the interaction state of the Explorer post it was mirrored into, so
-    the Neighbourhood feed can like/comment/report each spot.
+    Admins still see them (so they can review in context) and so does the author,
+    who is told their spot is hidden rather than left wondering where it went.
     """
-    limit = max(1, min(limit, 100))
-    offset = max(0, offset)
-    query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))
-
-    # Moderated-away spots drop out of the feed. Admins still see them (so they
-    # can review in context) and so does the author, who is told it's hidden
-    # rather than left wondering where their spot went.
     if current_user is None:
-        query = query.filter(~sighting_has_hidden_post())
-    elif not current_user.is_admin:
-        query = query.filter(
-            or_(~sighting_has_hidden_post(), Sighting.user_id == current_user.id)
-        )
-
-    if lat is not None and lng is not None:
-        lat_delta = radius_km / 111.0
-        lng_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 0.001)
-        query = query.filter(
-            Sighting.latitude.between(lat - lat_delta, lat + lat_delta),
-            Sighting.longitude.between(lng - lng_delta, lng + lng_delta),
-        )
-
-    sightings = (
-        query
-        .order_by(Sighting.spotted_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+        return query.filter(~sighting_has_hidden_post())
+    if current_user.is_admin:
+        return query
+    return query.filter(
+        or_(~sighting_has_hidden_post(), Sighting.user_id == current_user.id)
     )
 
-    if lat is not None and lng is not None:
-        sightings = [
-            s for s in sightings
-            if haversine_km(lat, lng, s.latitude, s.longitude) <= radius_km
-        ]
 
+def _serialize_feed_items(
+    db: Session, sightings: list[Sighting], current_user: User | None
+) -> list[FeedItem]:
+    """Enrich sightings with their cat, spotter and mirrored-post interaction state.
+
+    Counts are batched across the whole list (no N+1), so this serves both the
+    feed and single-sighting lookups from the same code path.
+    """
     # Gather every photo for each cat in one query (most recent first) so a feed
     # card can show a swipeable carousel without an N+1 fetch per card.
     cat_ids = {s.cat_id for s in sightings if s.cat_id is not None}
@@ -471,6 +441,81 @@ def get_feed(
             )
         )
     return items
+
+
+@router.get("/feed", response_model=list[FeedItem])
+def get_feed(
+    lat: float | None = None,
+    lng: float | None = None,
+    radius_km: float = 10.0,
+    limit: int = 30,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+):
+    """Recent sightings enriched with their cat's name and rarity score.
+
+    When lat/lng are provided, only sightings within radius_km are returned.
+    Falls back to the global feed when location is unavailable. Each item also
+    carries the interaction state of the Explorer post it was mirrored into, so
+    the Neighbourhood feed can like/comment/report each spot.
+    """
+    limit = max(1, min(limit, 100))
+    offset = max(0, offset)
+    query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))
+
+    # Moderated-away spots drop out of the feed.
+    query = _visible_sightings(query, current_user)
+
+    if lat is not None and lng is not None:
+        lat_delta = radius_km / 111.0
+        lng_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 0.001)
+        query = query.filter(
+            Sighting.latitude.between(lat - lat_delta, lat + lat_delta),
+            Sighting.longitude.between(lng - lng_delta, lng + lng_delta),
+        )
+
+    sightings = (
+        query
+        .order_by(Sighting.spotted_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    if lat is not None and lng is not None:
+        sightings = [
+            s for s in sightings
+            if haversine_km(lat, lng, s.latitude, s.longitude) <= radius_km
+        ]
+
+    return _serialize_feed_items(db, sightings, current_user)
+
+
+@router.get("/{sighting_id}", response_model=FeedItem)
+def get_sighting(
+    sighting_id: int,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+):
+    """One sighting by id, in the same shape the feed serves.
+
+    Deliberately unfiltered by location: this backs the sighting screen reached
+    from a cat's profile, where the spot can sit far outside the viewer's
+    neighbourhood. Routing that through the feed is what used to leave the tap
+    going nowhere.
+
+    Declared after /feed — a bare int path param would otherwise capture it.
+    """
+    # Same moderation rule as the feed, so a withheld photo isn't reachable by
+    # guessing an id. A hidden spot 404s rather than 403ing — no point telling a
+    # stranger it exists.
+    query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))
+    sighting = _visible_sightings(query, current_user).filter(Sighting.id == sighting_id).first()
+    if sighting is None:
+        raise HTTPException(status_code=404, detail="Sighting not found")
+
+    return _serialize_feed_items(db, [sighting], current_user)[0]
 
 
 @router.patch("/{sighting_id}/polaroid", response_model=SightingOut)
