@@ -30,6 +30,7 @@ from sqlalchemy.orm import joinedload
 from app.models.user import User
 from app.services.auth_service import get_current_user, get_optional_user
 from app.services.content_deletion import recompute_cat_after_sighting_removal, safe_unlink
+from app.services.demo_seed import is_demo_user, relocate_demo_content, visible_cats_query, visible_sightings_query
 from app.services.moderation import register_content_strike, sighting_has_hidden_post
 from app.services.push import push_to_user
 from app.services.rate_limit import enforce_daily_limit
@@ -158,7 +159,13 @@ def match_check(body: MatchCheckRequest, db: Session = Depends(get_db)):
         "body_size": body.body_size,
         "breed": body.breed,
     }
-    matches = find_match_candidates(db, body.latitude, body.longitude, features)
+    matches = find_match_candidates(
+        db,
+        body.latitude,
+        body.longitude,
+        features,
+        query=visible_cats_query(db.query(Cat), None),
+    )
 
     candidates = [
         MatchCandidate(
@@ -195,7 +202,7 @@ def create_sighting(
         raise HTTPException(status_code=400, detail="Invalid photo_path.")
 
     if body.cat_id is not None:
-        cat = db.query(Cat).filter(Cat.id == body.cat_id).first()
+        cat = visible_cats_query(db.query(Cat), None).filter(Cat.id == body.cat_id).first()
         if not cat:
             raise HTTPException(status_code=404, detail=f"Cat {body.cat_id} not found.")
         cat.sighting_count += 1
@@ -336,10 +343,10 @@ def _visible_sightings(query, current_user: User | None):
     who is told their spot is hidden rather than left wondering where it went.
     """
     if current_user is None:
-        return query.filter(~sighting_has_hidden_post())
+        return visible_sightings_query(query, None).filter(~sighting_has_hidden_post())
     if current_user.is_admin:
         return query
-    return query.filter(
+    return visible_sightings_query(query, current_user).filter(
         or_(~sighting_has_hidden_post(), Sighting.user_id == current_user.id)
     )
 
@@ -358,7 +365,7 @@ def _serialize_feed_items(
     photos_by_cat: dict[int, list[str]] = {}
     if cat_ids:
         rows = (
-            db.query(Sighting.cat_id, Sighting.photo_path)
+            visible_sightings_query(db.query(Sighting.cat_id, Sighting.photo_path), current_user)
             .filter(Sighting.cat_id.in_(cat_ids), ~sighting_has_hidden_post())
             .order_by(Sighting.spotted_at.desc())
             .all()
@@ -462,6 +469,8 @@ def get_feed(
     """
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
+    if is_demo_user(current_user):
+        relocate_demo_content(db, lat, lng)
     query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))
 
     # Moderated-away spots drop out of the feed.
@@ -580,7 +589,7 @@ def assign_cat(
     if sighting.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your sighting")
 
-    cat = db.query(Cat).filter(Cat.id == body.cat_id).first()
+    cat = visible_cats_query(db.query(Cat), None).filter(Cat.id == body.cat_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Cat not found")
 

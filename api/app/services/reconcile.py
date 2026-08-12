@@ -27,7 +27,7 @@ from app.models.cat import Cat
 from app.models.claim import ClaimPhoto
 from app.models.explorer import ExplorerPost
 from app.models.sighting import Sighting
-from app.services.storage import UPLOADS_PREFIX, Storage, get_storage
+from app.services.storage import UPLOADS_PREFIX, Storage, get_storage, is_absolute_url
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def gather_referenced_keys(db: Session) -> set[str]:
         (ClaimPhoto, ClaimPhoto.photo_path),
     ):
         for (value,) in db.query(column).filter(column.isnot(None)).distinct():
-            if value:
+            if value and not is_absolute_url(value):
                 keys.add(value)
     return keys
 

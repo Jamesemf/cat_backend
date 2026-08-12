@@ -33,7 +33,7 @@ from app.schemas.cat import (
     VibeCount,
 )
 from app.schemas.claim import INDOOR_OUTDOOR_VALUES, RegisterResult
-from app.services.auth_service import get_current_user, require_admin
+from app.services.auth_service import get_current_user, get_optional_user, require_admin
 from app.services.catalog import own_cover_photos, parse_covers
 from app.services.claim_verification import (
     MAX_CLAIM_ATTEMPTS_PER_DAY,
@@ -42,6 +42,7 @@ from app.services.claim_verification import (
     invalid_photo_reason,
 )
 from app.services.moderation import register_content_strike, sighting_has_hidden_post
+from app.services.demo_seed import DEMO_EMAIL, is_demo_user, relocate_demo_content, visible_cats_query, visible_sightings_query
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
 from app.utils.matching import haversine_km
@@ -58,9 +59,17 @@ MAX_PHOTO_BYTES = 5 * 1024 * 1024
 
 
 @router.get("", response_model=list[CatOut])
-def list_cats(limit: int = 100, db: Session = Depends(get_db)):
+def list_cats(
+    limit: int = 100,
+    lat: float | None = None,
+    lng: float | None = None,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+):
     limit = max(1, min(limit, 200))
-    return db.query(Cat).order_by(Cat.last_seen.desc()).limit(limit).all()
+    if is_demo_user(current_user):
+        relocate_demo_content(db, lat, lng)
+    return visible_cats_query(db.query(Cat), current_user).order_by(Cat.last_seen.desc()).limit(limit).all()
 
 
 @router.get("/nearby", response_model=list[CatNearby])
@@ -71,6 +80,7 @@ def list_cats_nearby(
     lng: float | None = None,
     radius_km: float = 3.0,
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ):
     """Cats for the onboarding picker, each with up to `photos` recent photos so a
     user can recognise their own cat by sight rather than by an assigned nickname.
@@ -86,7 +96,7 @@ def list_cats_nearby(
         lat_delta = radius_km / 111.0
         lng_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 0.001)
         prefiltered = (
-            db.query(Cat)
+            visible_cats_query(db.query(Cat), current_user)
             .filter(
                 Cat.last_lat.isnot(None),
                 Cat.last_lng.isnot(None),
@@ -102,7 +112,7 @@ def list_cats_nearby(
         within.sort(key=lambda cd: cd[1])
         cats = [c for c, _ in within[:limit]]
     else:
-        cats = db.query(Cat).order_by(Cat.last_seen.desc()).limit(limit).all()
+        cats = visible_cats_query(db.query(Cat), current_user).order_by(Cat.last_seen.desc()).limit(limit).all()
     ids = [c.id for c in cats]
     by_cat: dict[int, list[str]] = {}
     if ids:
@@ -401,10 +411,10 @@ def merge_cats(
 
 @router.get("/stats", response_model=GlobalStats)
 def get_global_stats(db: Session = Depends(get_db)):
-    total_cats = db.query(Cat).count()
-    total_sightings = db.query(Sighting).count()
+    total_cats = visible_cats_query(db.query(Cat), None).count()
+    total_sightings = visible_sightings_query(db.query(Sighting), None).count()
 
-    cats = db.query(Cat).all()
+    cats = visible_cats_query(db.query(Cat), None).all()
 
     def top_n(values: list[str | None], n: int = 5) -> list[CountItem]:
         counts = Counter(v for v in values if v)
@@ -416,7 +426,7 @@ def get_global_stats(db: Session = Depends(get_db)):
     fur_lengths = top_n([c.fur_length    for c in cats])
 
     most_spotted_cat = (
-        db.query(Cat).order_by(Cat.sighting_count.desc()).first()
+        visible_cats_query(db.query(Cat), None).order_by(Cat.sighting_count.desc()).first()
     )
     most_spotted = (
         TopCat(
@@ -452,7 +462,10 @@ def get_leaderboard(db: Session = Depends(get_db)):
                 func.count(count_col).label("value"),
             )
             .join(join_model, join_model.user_id == User.id)
+            .filter(User.email != DEMO_EMAIL)
         )
+        if join_model is Sighting:
+            q = visible_sightings_query(q, None)
         if extra_filter is not None:
             q = q.filter(extra_filter)
         rows = (
@@ -485,14 +498,17 @@ def list_my_cats(
 ):
     rows = (
         db.query(distinct(Sighting.cat_id))
-        .filter(Sighting.user_id == current_user.id, Sighting.cat_id.isnot(None))
+        .filter(
+            Sighting.user_id == current_user.id,
+            Sighting.cat_id.isnot(None),
+        )
         .all()
     )
     cat_ids = [row[0] for row in rows]
     if not cat_ids:
         return []
     cats = (
-        db.query(Cat)
+        visible_cats_query(db.query(Cat), current_user)
         .filter(Cat.id.in_(cat_ids))
         .order_by(Cat.last_seen.desc())
         .all()
@@ -529,12 +545,16 @@ def list_my_photos_of_cat(
 
 
 @router.get("/{cat_id}/territory", response_model=TerritoryOut)
-def get_territory(cat_id: int, db: Session = Depends(get_db)):
+def get_territory(
+    cat_id: int,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+):
     """Convex hull of all sightings for a cat, as a GeoJSON Polygon Feature."""
-    cat = db.query(Cat).filter(Cat.id == cat_id).first()
+    cat = visible_cats_query(db.query(Cat), current_user).filter(Cat.id == cat_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Cat not found")
-    sightings = db.query(Sighting).filter(Sighting.cat_id == cat_id).all()
+    sightings = visible_sightings_query(db.query(Sighting), current_user).filter(Sighting.cat_id == cat_id).all()
     return TerritoryOut(
         cat_id=cat_id,
         sighting_count=len(sightings),
@@ -546,11 +566,12 @@ def get_territory(cat_id: int, db: Session = Depends(get_db)):
 def get_cat(
     cat_id: int,
     db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
 ):
     # Each sighting carries its spotter's id and emoji, which live on the user —
     # eager-loaded so serialising a well-spotted cat doesn't fire a query per row.
     cat = (
-        db.query(Cat)
+        visible_cats_query(db.query(Cat), current_user)
         .options(selectinload(Cat.sightings).joinedload(Sighting.user))
         .filter(Cat.id == cat_id)
         .first()

@@ -32,6 +32,10 @@ log = logging.getLogger(__name__)
 UPLOADS_PREFIX = "uploads"
 
 
+def is_absolute_url(value: str | None) -> bool:
+    return bool(value and value.startswith(("http://", "https://")))
+
+
 @dataclass(frozen=True)
 class StoredObject:
     """One object in a storage backend, as seen by reconciliation."""
@@ -107,12 +111,18 @@ class LocalStorage(Storage):
         p.write_bytes(data)
 
     def delete(self, key: str) -> None:
+        if is_absolute_url(key):
+            return
         self._path(key).unlink(missing_ok=True)
 
     def exists(self, key: str) -> bool:
+        if is_absolute_url(key):
+            return True
         return self._path(key).is_file()
 
     def url(self, key: str) -> str:
+        if is_absolute_url(key):
+            return key
         # Relative — the frontend prepends API_BASE and the /uploads route serves
         # the bytes. Unchanged from the pre-S3 behaviour.
         return key
@@ -152,9 +162,13 @@ class S3Storage(Storage):
         )
 
     def delete(self, key: str) -> None:
+        if is_absolute_url(key):
+            return
         self._client.delete_object(Bucket=self.bucket, Key=key)
 
     def exists(self, key: str) -> bool:
+        if is_absolute_url(key):
+            return True
         from botocore.exceptions import ClientError
 
         try:
@@ -166,6 +180,8 @@ class S3Storage(Storage):
             raise
 
     def url(self, key: str) -> str:
+        if is_absolute_url(key):
+            return key
         if self.media_base_url:
             # CloudFront / public bucket domain — clients fetch directly,
             # bypassing the API entirely.

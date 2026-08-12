@@ -40,6 +40,12 @@ def test_gather_referenced_keys_spans_every_media_table(db, storage):
     }
 
 
+def test_gather_referenced_keys_ignores_absolute_urls(db, storage):
+    _commit(db, Cat(last_photo_path="https://images.example.test/cat.jpg"))
+
+    assert gather_referenced_keys(db) == set()
+
+
 def test_in_sync_when_every_object_is_referenced(db, storage):
     key = storage.put(b"img", ext=".jpg")
     _commit(db, Sighting(photo_path=key, latitude=0.0, longitude=0.0))

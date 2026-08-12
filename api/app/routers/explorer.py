@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.db.session import get_db
 from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
 from app.models.notification import Notification
+from app.models.cat import Cat
 from app.models.sighting import Sighting
 from app.models.user import User
 from app.schemas.explorer import (
@@ -20,6 +21,7 @@ from app.schemas.explorer import (
 )
 from app.services.auth_service import get_current_user, get_optional_user
 from app.services.content_deletion import purge_post, safe_unlink
+from app.services.demo_seed import can_see_demo_content, is_demo_feature_expr
 from app.services.moderation import apply_report_threshold
 from app.services.push import push_to_user
 
@@ -100,8 +102,18 @@ def _visible(query, current_user: User | None):
     """Drop moderated-away posts. Admins see everything so they can review in
     place; the author keeps seeing their own hidden post (flagged as hidden)
     rather than watching it vanish with no explanation."""
-    if current_user is not None and current_user.is_admin:
+    if can_see_demo_content(current_user):
         return query
+    query = query.filter(
+        or_(
+            ExplorerPost.sighting_id.is_(None),
+            ~ExplorerPost.sighting.has(is_demo_feature_expr(Sighting.features_json)),
+        ),
+        or_(
+            ExplorerPost.cat_id.is_(None),
+            ~ExplorerPost.cat.has(is_demo_feature_expr(Cat.features_json)),
+        ),
+    )
     if current_user is not None:
         return query.filter(
             or_(ExplorerPost.hidden_at.is_(None), ExplorerPost.user_id == current_user.id)

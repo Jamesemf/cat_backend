@@ -15,6 +15,7 @@ from app.models.user import User
 from app.schemas.cat import CatOut
 from app.services.auth_service import get_current_user
 from app.services.catalog import own_cover_photos
+from app.services.demo_seed import visible_cats_query
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -133,7 +134,7 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
     cats: list[Cat] = []
     if cat_ids:
         cats = (
-            db.query(Cat)
+            visible_cats_query(db.query(Cat), None)
             .filter(Cat.id.in_(cat_ids))
             .order_by(Cat.last_seen.desc())
             .limit(MAX_PROFILE_CATS)

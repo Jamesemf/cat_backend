@@ -24,6 +24,7 @@ from app.routers import (
     users,
 )
 from app.services.reconcile import reconcile
+from app.services.demo_seed import seed_apple_review_demo
 from app.utils.rarity import compute_rarity_score
 
 log = logging.getLogger(__name__)
@@ -362,6 +363,13 @@ with engine.connect() as _conn:
         WHERE NOT EXISTS (SELECT 1 FROM explorer_posts p WHERE p.sighting_id = s.id)
     """))
     _conn.commit()
+
+with SessionLocal() as _seed_db:
+    try:
+        seed_apple_review_demo(_seed_db)
+    except Exception:
+        _seed_db.rollback()
+        log.exception("Apple review demo seed failed")
 
 
 async def _rarity_recompute_loop() -> None:

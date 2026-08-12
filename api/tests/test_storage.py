@@ -40,6 +40,13 @@ def test_local_url_returns_key_unchanged(storage):
     assert storage.url(key) == key
 
 
+def test_absolute_url_is_already_fetchable(storage):
+    url = "https://images.example.test/cat.jpg"
+    assert storage.url(url) == url
+    assert storage.exists(url)
+    storage.delete(url)  # external demo/media URLs are not owned by storage.
+
+
 def test_list_objects_reports_size_and_tzaware_mtime(storage):
     k1 = storage.put(b"a", ext=".jpg")
     k2 = storage.put(b"bb", ext=".jpg", prefix=f"{UPLOADS_PREFIX}/claims")

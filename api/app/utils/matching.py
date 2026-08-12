@@ -72,6 +72,7 @@ def find_match_candidates(
     radius_km: float = 0.5,
     time_days: int = 90,
     max_results: int = 3,
+    query=None,
 ) -> list[tuple[Cat, float]]:
     """Return (cat, confidence) pairs for cats near the sighting that share features.
 
@@ -85,8 +86,9 @@ def find_match_candidates(
     lat_delta = radius_km / 111.0
     lng_delta = radius_km / max(111.0 * math.cos(math.radians(lat)), 0.001)
 
+    base_query = query if query is not None else db.query(Cat)
     prefiltered = (
-        db.query(Cat)
+        base_query
         .filter(
             Cat.last_lat.isnot(None),
             Cat.last_lng.isnot(None),
