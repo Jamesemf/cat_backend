@@ -116,6 +116,10 @@ class SightingOut(BaseModel):
     longitude: float
     spotted_at: UtcDatetime
     spotter_name: str | None
+    # The spotter's id and chosen avatar emoji, matching the names FeedItem uses.
+    # Null for anonymous sightings (no logged-in user).
+    spotter_id: int | None = None
+    spotter_emoji: str | None = None
     breed_description: str | None
     vibes: str | None
 

@@ -33,6 +33,11 @@ class SightingOut(BaseModel):
     longitude: float
     spotted_at: UtcDatetime
     spotter_name: str | None
+    # The spotter's id and chosen avatar emoji, matching the names FeedItem uses,
+    # so the profile can show a real avatar and link through to their page. Null
+    # for anonymous sightings (no logged-in user).
+    spotter_id: int | None = None
+    spotter_emoji: str | None = None
     # The spotter's polaroid keepsake for this sighting (null = default polaroid).
     frame_id: str | None = None
     photo_adjust: PhotoAdjust | None = None
@@ -53,6 +58,8 @@ class SightingOut(BaseModel):
             "longitude": data.longitude,
             "spotted_at": data.spotted_at,
             "spotter_name": display_name,
+            "spotter_id": getattr(user, "id", None) if user else None,
+            "spotter_emoji": getattr(user, "avatar_emoji", None) if user else None,
             "frame_id": data.frame_id,
             "photo_adjust": data.photo_adjust,
             "caption": data.caption,
@@ -113,9 +120,20 @@ class CatOut(CatBase):
     model_config = {"from_attributes": True}
 
 
+class VibeCount(BaseModel):
+    """One vibe and how many sightings noted it. See utils/vibes.tally_vibes."""
+
+    label: str
+    count: int
+
+
 class CatWithSightings(CatOut):
     sightings: list[SightingOut] = []
     owner: OwnerCard | None = None
+    # What spotters have said about this cat, counted across every sighting and
+    # ordered most-agreed first. The inherited `vibes` field is *not* a tally —
+    # it only holds the latest sighting's words.
+    vibe_counts: list[VibeCount] = []
 
 
 class TerritoryOut(BaseModel):

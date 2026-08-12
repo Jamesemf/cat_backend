@@ -3,7 +3,7 @@ import math
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import distinct, func
 
 from app.db.session import get_db
@@ -30,6 +30,7 @@ from app.schemas.cat import (
     MyPhotoOut,
     TerritoryOut,
     TopCat,
+    VibeCount,
 )
 from app.schemas.claim import INDOOR_OUTDOOR_VALUES, RegisterResult
 from app.services.auth_service import get_current_user, require_admin
@@ -46,6 +47,7 @@ from app.services.vision import VisionError, analyze_cat_photo
 from app.utils.matching import haversine_km
 from app.utils.rarity import compute_rarity_score
 from app.utils.territory import build_territory_geojson
+from app.utils.vibes import tally_vibes
 from app.utils.upload import read_upload_capped, sanitize_image
 
 router = APIRouter(prefix="/cats", tags=["cats"])
@@ -545,9 +547,20 @@ def get_cat(
     cat_id: int,
     db: Session = Depends(get_db),
 ):
-    cat = db.query(Cat).filter(Cat.id == cat_id).first()
+    # Each sighting carries its spotter's id and emoji, which live on the user —
+    # eager-loaded so serialising a well-spotted cat doesn't fire a query per row.
+    cat = (
+        db.query(Cat)
+        .options(selectinload(Cat.sightings).joinedload(Sighting.user))
+        .filter(Cat.id == cat_id)
+        .first()
+    )
     if not cat:
         raise HTTPException(status_code=404, detail="Cat not found")
     out = CatWithSightings.model_validate(cat)
     out.owner = owner_card_for_cat(db, cat_id)
+    # Counted over the sightings already loaded above, so this costs no query.
+    out.vibe_counts = [
+        VibeCount(**v) for v in tally_vibes(cat.sightings, fallback=cat.vibes)
+    ]
     return out
