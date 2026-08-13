@@ -49,7 +49,7 @@ def make_admin(email: str) -> None:
 
 def main() -> int:
     # Pick a cat whose photo files still exist on disk (a single photo reused
-    # twice is fine: the claim needs 2-3 uploads, not 2 distinct originals).
+    # three times is fine: the claim needs 3 uploads, not 3 distinct originals).
     conn = sqlite3.connect(DB)
     rows = conn.execute(
         """
@@ -66,7 +66,7 @@ def main() -> int:
             by_cat.setdefault(cid, (cname, []))[1].append(p)
     cat_id, cat_name, photo_paths = None, None, []
     for cid, (cname, paths) in by_cat.items():
-        cat_id, cat_name, photo_paths = cid, cname, (paths * 2)[:2]
+        cat_id, cat_name, photo_paths = cid, cname, (paths * 3)[:3]
         break
     if cat_id is None:
         print("No cat with an existing photo file; cannot run.")

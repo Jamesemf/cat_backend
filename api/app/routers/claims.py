@@ -86,12 +86,12 @@ async def submit_claim(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Claim a cat by submitting 2-3 photos plus the owner card.
+    """Claim a cat by submitting 3 photos of the claimant with it, plus the owner card.
 
     Grants nothing. The claim is recorded as pending and waits for a moderator
     to approve or reject it in /moderation/claims — photos are run through
-    vision on the way in only to catch harmful content, to check there's a
-    single cat in frame, and to record what vision saw for the reviewer.
+    vision on the way in only to catch harmful content, to check there's a cat
+    in frame at all, and to record what vision saw for the reviewer.
     """
     cat = db.query(Cat).filter(Cat.id == cat_id).first()
     if not cat:
@@ -100,7 +100,11 @@ async def submit_claim(
     if not (MIN_PHOTOS <= len(photos) <= MAX_PHOTOS):
         raise HTTPException(
             status_code=400,
-            detail=f"Submit between {MIN_PHOTOS} and {MAX_PHOTOS} photos.",
+            detail=(
+                f"Submit {MIN_PHOTOS} photos showing you with the cat."
+                if MIN_PHOTOS == MAX_PHOTOS
+                else f"Submit between {MIN_PHOTOS} and {MAX_PHOTOS} photos."
+            ),
         )
     if indoor_outdoor not in INDOOR_OUTDOOR_VALUES:
         raise HTTPException(status_code=400, detail="indoor_outdoor must be indoor, outdoor or both.")
@@ -225,9 +229,10 @@ async def submit_claim(
         detail = register_content_strike(db, current_user, flagged.inappropriate_reason)
         raise HTTPException(status_code=400, detail=detail)
 
-    # Not a judgement on ownership — just whether there's a single cat to look
-    # at. Drop the files, as the strike path above does, or every mis-aimed
-    # camera leaves uploads behind for the reconcile sweep to find.
+    # Not a judgement on ownership — just whether there's a cat to look at. A
+    # second cat in frame is fine here and passes through to the reviewer with a
+    # count against the photo. Drop the files, as the strike path above does, or
+    # every mis-aimed camera leaves uploads behind for the reconcile sweep.
     invalid = invalid_photo_reason(photo_features)
     if invalid is not None:
         for p in saved_paths:

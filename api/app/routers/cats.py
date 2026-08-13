@@ -39,7 +39,7 @@ from app.services.claim_verification import (
     MAX_CLAIM_ATTEMPTS_PER_DAY,
     MAX_OPEN_PENDING_CLAIMS,
     MAX_PHOTOS,
-    invalid_photo_reason,
+    invalid_registration_photo_reason,
 )
 from app.services.moderation import register_content_strike, sighting_has_hidden_post
 from app.services.demo_seed import DEMO_ACCOUNT_EMAILS, is_demo_user, relocate_demo_content, visible_cats_query, visible_sightings_query
@@ -247,7 +247,7 @@ async def register_cat(
         detail = register_content_strike(db, current_user, flagged.inappropriate_reason)
         raise HTTPException(status_code=400, detail=detail)
 
-    invalid = invalid_photo_reason(photo_features)
+    invalid = invalid_registration_photo_reason(photo_features)
     if invalid is not None:
         raise HTTPException(status_code=400, detail=invalid)
 
