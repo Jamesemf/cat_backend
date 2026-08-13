@@ -41,6 +41,11 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     is_new_user: bool = False
+    # True when the account has never completed onboarding (users.onboarded_at is
+    # null), so the app sends it through the intro carousel and profile setup
+    # rather than straight to the tabs. Unlike is_new_user this survives a
+    # reinstall and covers every sign-in method, including email/password.
+    needs_onboarding: bool = False
 
 
 class UserOut(BaseModel):

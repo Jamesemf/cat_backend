@@ -13,7 +13,7 @@ from app.models.exploration import ExploredTile
 from app.models.sighting import Sighting
 from app.models.user import User
 from app.schemas.cat import CatOut
-from app.services.auth_service import get_current_user
+from app.services.auth_service import get_current_user, get_optional_user
 from app.services.catalog import own_cover_photos
 from app.services.demo_seed import visible_cats_query
 
@@ -116,7 +116,11 @@ def get_my_catalog(current_user: User = Depends(get_current_user)):
 
 
 @router.get("/{user_id}", response_model=PublicProfileOut)
-def get_public_profile(user_id: int, db: Session = Depends(get_db)):
+def get_public_profile(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+):
     """A spotter's public profile: display name + avatar, a couple of
     exploration stats, and the cats they've spotted (their Cat-a-log) arranged
     and framed the way the owner designed it."""
@@ -134,7 +138,10 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
     cats: list[Cat] = []
     if cat_ids:
         cats = (
-            visible_cats_query(db.query(Cat), None)
+            # Scoped to the viewer, so the Apple review account can open the
+            # procedural neighbours who spotted its seeded cats instead of
+            # finding an empty Cat-a-log. Unchanged for everyone else.
+            visible_cats_query(db.query(Cat), current_user)
             .filter(Cat.id.in_(cat_ids))
             .order_by(Cat.last_seen.desc())
             .limit(MAX_PROFILE_CATS)

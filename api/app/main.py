@@ -100,6 +100,9 @@ with engine.connect() as _conn:
         if "banned_at" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN banned_at DATETIME"))
             _conn.commit()
+        if "onboarded_at" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN onboarded_at DATETIME"))
+            _conn.commit()
         _ev_cols = [r[1] for r in _conn.execute(_text("PRAGMA table_info(email_verifications)")).fetchall()]
         if _ev_cols and "attempts" not in _ev_cols:
             _conn.execute(_text("ALTER TABLE email_verifications ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"))
@@ -231,6 +234,10 @@ with engine.connect() as _conn:
         ))
         _conn.commit()
         _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS onboarded_at TIMESTAMP"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
             "ALTER TABLE sightings ADD COLUMN IF NOT EXISTS frame_id TEXT"
         ))
         _conn.commit()
@@ -351,6 +358,16 @@ with engine.connect() as _conn:
         UPDATE users SET email_verified = TRUE
         WHERE email_verified = FALSE
           AND email NOT IN (SELECT email FROM email_verifications)
+    """))
+    _conn.commit()
+    # Grandfather every account that predates onboarded_at: they finished
+    # onboarding long before the column existed, so leaving it null would loop
+    # them back through the intro on their next sign-in. New registrations start
+    # null and are stamped by POST /auth/onboarded. Idempotent — a second run
+    # finds nothing to update. (The Apple review account is deliberately reset to
+    # null afterwards by the demo seed below.)
+    _conn.execute(_text("""
+        UPDATE users SET onboarded_at = created_at WHERE onboarded_at IS NULL
     """))
     _conn.commit()
     # Backfill: every sighting appears in the Explorer feed exactly once.

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from random import randint
 
@@ -32,11 +33,14 @@ from app.services.auth_service import (
     verify_apple_identity_token,
     verify_password,
 )
+from app.services.demo_seed import is_demo_user, reset_apple_review_demo
 from app.services.email import send_password_reset_code, send_verification_code
 from app.services.rate_limit import enforce_daily_limit
 from app.utils.profanity import contains_profanity
 
 router = APIRouter(tags=["auth"])
+
+log = logging.getLogger(__name__)
 
 # A 6-digit code is only safe if it can't be ground down within its 15-minute
 # window. Invalidate it after this many wrong guesses, forcing the attacker to
@@ -130,7 +134,12 @@ def register(body: RegisterRequest, request: Request, db: Session = Depends(get_
     # Email a verification code. The account is usable immediately (a token is
     # returned); the app can prompt for the code and call /verify-email.
     issue_verification_code(db, user.email)
-    return TokenResponse(access_token=create_access_token({"sub": str(user.id)}))
+    # onboarded_at starts null, so this account is routed through the intro flow
+    # (and resumes there if the app is killed partway).
+    return TokenResponse(
+        access_token=create_access_token({"sub": str(user.id)}),
+        needs_onboarding=True,
+    )
 
 
 @router.post("/verify-email")
@@ -209,7 +218,19 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     if not user.email_verified:
         issue_verification_code(db, user.email)
         raise HTTPException(status_code=403, detail="email_not_verified")
-    return TokenResponse(access_token=create_access_token({"sub": str(user.id)}))
+    # The Apple review account is rebuilt on every sign-in, so each reviewer gets
+    # the same pristine first run (see services/demo_seed). Best-effort — a seed
+    # failure must never cost them the login.
+    if is_demo_user(user):
+        try:
+            reset_apple_review_demo(db, user)
+        except Exception:
+            db.rollback()
+            log.exception("Apple review demo reset failed")
+    return TokenResponse(
+        access_token=create_access_token({"sub": str(user.id)}),
+        needs_onboarding=user.onboarded_at is None,
+    )
 
 
 @router.post("/apple", response_model=TokenResponse)
@@ -250,7 +271,11 @@ def login_apple(body: AppleLoginRequest, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(user)
-    return TokenResponse(access_token=create_access_token({"sub": str(user.id)}), is_new_user=is_new)
+    return TokenResponse(
+        access_token=create_access_token({"sub": str(user.id)}),
+        is_new_user=is_new,
+        needs_onboarding=user.onboarded_at is None,
+    )
 
 
 @router.post("/google", response_model=TokenResponse)
@@ -290,7 +315,11 @@ def login_google(body: GoogleLoginRequest, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(user)
-    return TokenResponse(access_token=create_access_token({"sub": str(user.id)}), is_new_user=is_new)
+    return TokenResponse(
+        access_token=create_access_token({"sub": str(user.id)}),
+        is_new_user=is_new,
+        needs_onboarding=user.onboarded_at is None,
+    )
 
 
 @router.post("/forgot-password")
@@ -404,6 +433,23 @@ def refresh_token(current_user: User = Depends(get_current_user)):
 @router.get("/me", response_model=UserOut)
 def get_me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.post("/onboarded", status_code=204)
+def mark_onboarded(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Record that the account finished onboarding, so later sign-ins skip it.
+
+    The app calls this as the last step of the flow, just before signing in.
+    Idempotent, and it keeps the original timestamp if called again — the flow
+    can be re-entered (killed mid-onboarding, then resumed) without the "when
+    did they join properly" answer moving.
+    """
+    if current_user.onboarded_at is None:
+        current_user.onboarded_at = datetime.now(timezone.utc)
+        db.commit()
 
 
 @router.put("/me", response_model=UserOut)

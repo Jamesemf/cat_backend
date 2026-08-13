@@ -21,6 +21,12 @@ class User(Base):
     # Cosmetic; null means the default (newest-first, default frames).
     catalog_layout: Mapped[str | None] = mapped_column(Text, nullable=True)
     display_name_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # When the user finished the onboarding flow (intro carousel → profile setup →
+    # "do you own a cat?"). Null means they authenticated but never completed it,
+    # so /auth/login and the social endpoints answer needs_onboarding=True and the
+    # app routes them into the flow instead of straight to the tabs. Set by
+    # POST /auth/onboarded, the app's last step before signing in.
+    onboarded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Per-type notification opt-outs, controlled from Settings > Notifications.
     # These gate the area-based fan-outs (services/sighting_notifications.py);

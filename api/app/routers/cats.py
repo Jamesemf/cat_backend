@@ -42,7 +42,7 @@ from app.services.claim_verification import (
     invalid_photo_reason,
 )
 from app.services.moderation import register_content_strike, sighting_has_hidden_post
-from app.services.demo_seed import DEMO_EMAIL, is_demo_user, relocate_demo_content, visible_cats_query, visible_sightings_query
+from app.services.demo_seed import DEMO_ACCOUNT_EMAILS, is_demo_user, relocate_demo_content, visible_cats_query, visible_sightings_query
 from app.services.storage import get_storage
 from app.services.vision import VisionError, analyze_cat_photo
 from app.utils.matching import haversine_km
@@ -90,6 +90,11 @@ def list_cats_nearby(
     than whatever was most recently spotted anywhere in the world. Without a
     location we fall back to most-recently-seen ordering.
     """
+    # The first step of onboarding that reports a location, so it's where the
+    # Apple review account's seeded cats get moved into range — without this the
+    # "do you own a cat?" picker would show them an empty list.
+    if is_demo_user(current_user):
+        relocate_demo_content(db, lat, lng)
     if lat is not None and lng is not None:
         # Bounding-box prefilter in SQL (SQLite has no PostGIS), then a precise
         # Haversine check — mirrors utils.matching.find_match_candidates.
@@ -462,7 +467,9 @@ def get_leaderboard(db: Session = Depends(get_db)):
                 func.count(count_col).label("value"),
             )
             .join(join_model, join_model.user_id == User.id)
-            .filter(User.email != DEMO_EMAIL)
+            # The review account and the procedural neighbours who own its seeded
+            # cats never appear in public rankings.
+            .filter(User.email.notin_(DEMO_ACCOUNT_EMAILS))
         )
         if join_model is Sighting:
             q = visible_sightings_query(q, None)

@@ -140,7 +140,11 @@ async def analyze_photo(
 
 
 @router.post("/match-check", response_model=MatchCheckResponse)
-def match_check(body: MatchCheckRequest, db: Session = Depends(get_db)):
+def match_check(
+    body: MatchCheckRequest,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+):
     """Return Re-ID candidates for a potential sighting before committing.
 
     The client should call this after /analyze once the user is ready to submit,
@@ -164,7 +168,11 @@ def match_check(body: MatchCheckRequest, db: Session = Depends(get_db)):
         body.latitude,
         body.longitude,
         features,
-        query=visible_cats_query(db.query(Cat), None),
+        # Scoped to the caller: the Apple review account has to be able to
+        # recognise the seeded cats in its neighbourhood and add its own photo to
+        # one, which is the whole point of them being there. Nobody else's
+        # candidates change — visible_cats_query only widens for demo/admin.
+        query=visible_cats_query(db.query(Cat), current_user),
     )
 
     candidates = [
@@ -202,7 +210,9 @@ def create_sighting(
         raise HTTPException(status_code=400, detail="Invalid photo_path.")
 
     if body.cat_id is not None:
-        cat = visible_cats_query(db.query(Cat), None).filter(Cat.id == body.cat_id).first()
+        # Same scoping as match-check above, so a candidate offered there can
+        # actually be committed to.
+        cat = visible_cats_query(db.query(Cat), current_user).filter(Cat.id == body.cat_id).first()
         if not cat:
             raise HTTPException(status_code=404, detail=f"Cat {body.cat_id} not found.")
         cat.sighting_count += 1
@@ -589,7 +599,7 @@ def assign_cat(
     if sighting.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Not your sighting")
 
-    cat = visible_cats_query(db.query(Cat), None).filter(Cat.id == body.cat_id).first()
+    cat = visible_cats_query(db.query(Cat), current_user).filter(Cat.id == body.cat_id).first()
     if not cat:
         raise HTTPException(status_code=404, detail="Cat not found")
 
