@@ -23,6 +23,7 @@ from app.routers import (
     sightings,
     users,
 )
+from app.middleware import add_security_headers
 from app.services.reconcile import reconcile
 from app.services.retention import sweep_claim_photos, sweep_rate_limit_counters
 from app.services.demo_seed import seed_apple_review_demo
@@ -517,6 +518,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Added after CORS so it ends up outermost (Starlette's add_middleware prepends,
+# so the last one added wraps the rest) — that way the headers land on CORS
+# preflight responses too, not just on the ones the routers produce.
+add_security_headers(app)
 
 # Brand assets (e.g. the email logo) served from a stable public URL so
 # transactional emails can reference https://<api>/static/logo.png. Path is
