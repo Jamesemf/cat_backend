@@ -308,17 +308,35 @@ def _get_claim_or_404(db: Session, claim_id: int) -> CatClaim:
     return claim
 
 
-def _features_of(raw: str | None) -> dict:
-    """The compared subset of a stored features_json blob, tolerating junk."""
+def _parsed_features(raw: str | None) -> dict:
+    """A stored features_json blob as a dict, tolerating junk."""
     if not raw:
         return {}
     try:
         parsed = json.loads(raw)
     except (ValueError, TypeError):
         return {}
-    if not isinstance(parsed, dict):
-        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _features_of(raw: str | None) -> dict:
+    """The compared subset of a stored features_json blob."""
+    parsed = _parsed_features(raw)
     return {k: parsed.get(k) for k in COMPARED_FEATURES}
+
+
+def _cat_count_of(raw: str | None) -> int | None:
+    """How many cats vision saw in one photo, or None if it didn't say.
+
+    Kept out of _features_of because that subset is also read as a cat's own
+    attributes, where a per-photo count means nothing. It travels with claim
+    photos because a claim may hold more than one cat now — the claimant's other
+    cat, in shot at home — and when it does, the single row of features beside
+    it could be describing either animal. Without the count the reviewer reads
+    that row as a statement about the cat being claimed.
+    """
+    count = _parsed_features(raw).get("cat_count")
+    return count if isinstance(count, int) else None
 
 
 def _queue_item(db: Session, claim: CatClaim) -> ClaimQueueItem:
@@ -357,6 +375,7 @@ def _queue_item(db: Session, claim: CatClaim) -> ClaimQueueItem:
                 id=p.id,
                 photo_path=p.photo_path,
                 features=_features_of(p.features_json),
+                cat_count=_cat_count_of(p.features_json),
             )
             for p in photos
         ],

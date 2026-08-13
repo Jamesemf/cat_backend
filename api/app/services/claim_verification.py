@@ -7,7 +7,7 @@ human in /moderation/claims, and nothing in this module decides anything.
 What survives is intake — the limits on how often someone may claim, and the
 vision pass over the submitted photos. That pass no longer judges ownership. It
 exists to catch harmful content (which earns a strike), to reject submissions
-that plainly aren't a photo of one cat, and to record what vision saw so the
+that plainly aren't a photo of a cat, and to record what vision saw so the
 moderator can read it beside the cat's own record.
 
 `utils.matching.score_candidate` is untouched and still drives sighting Re-ID.
@@ -25,7 +25,11 @@ from app.services.vision import CatFeatures, analyze_cat_photo
 
 log = logging.getLogger(__name__)
 
-MIN_PHOTOS = 2
+# A claim takes all three photos, and each must show the claimant with the cat.
+# Photos of a cat prove nothing on their own — anyone can take those — so the
+# person in frame is what the moderator actually reads. /cats/register is a
+# different case (no existing cat to take from) and still accepts one photo.
+MIN_PHOTOS = 3
 MAX_PHOTOS = 3
 # After a rejection, the same user must wait this long before retrying the same cat.
 CLAIM_COOLDOWN_HOURS = 24
@@ -46,15 +50,34 @@ async def analyze_claim_photos(photos_bytes: list[bytes]) -> list[CatFeatures]:
 
 
 def invalid_photo_reason(photo_features: list[CatFeatures]) -> str | None:
-    """Why this submission can't be reviewed at all, or None if it can.
+    """Why this claim can't be reviewed at all, or None if it can.
 
-    Submission validity, not an ownership judgement — the same check
-    /cats/register has always applied. It keeps photos of dogs, and of five cats
-    at once, out of a queue a person has to read.
+    Submission validity, not an ownership judgement. It keeps photos of dogs out
+    of a queue a person has to read, and stops there: a second cat in frame is
+    not a defect in a claim. Claims ask for the claimant at home with the cat,
+    and a household with two cats produces exactly that photo — rejecting it
+    would turn the most ordinary evidence there is into an error message, before
+    any human saw it. The moderator is told the count instead
+    (routers/moderation.py) and reads the photo themselves.
     """
     for i, f in enumerate(photo_features, start=1):
         if not f.is_cat:
             return f"Photo {i} doesn't appear to contain a cat."
+    return None
+
+
+def invalid_registration_photo_reason(photo_features: list[CatFeatures]) -> str | None:
+    """The same, for /cats/register, which additionally needs one cat per photo.
+
+    Registration photos aren't only evidence: approving one builds the new Cat
+    out of the features vision read from them. With two cats in frame there is
+    no saying which animal those features describe, so the record would be built
+    from a guess. A claim has an existing cat to compare against and doesn't.
+    """
+    reason = invalid_photo_reason(photo_features)
+    if reason is not None:
+        return reason
+    for i, f in enumerate(photo_features, start=1):
         if f.cat_count > 1:
             return f"Photo {i} contains more than one cat. Please photograph your cat alone."
     return None

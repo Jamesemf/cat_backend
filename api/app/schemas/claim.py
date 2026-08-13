@@ -91,6 +91,9 @@ class ClaimPhotoOut(BaseModel):
     id: int
     photo_path: MediaUrl
     features: dict = {}
+    # Cats in frame. Above one, `features` may be describing the wrong one — the
+    # reviewer is shown the count so the row isn't read as fact about the cat.
+    cat_count: int | None = None
 
 
 class ClaimQueueItem(BaseModel):
