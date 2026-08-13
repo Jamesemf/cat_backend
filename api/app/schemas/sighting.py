@@ -4,7 +4,6 @@ from datetime import datetime
 from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.media import MediaUrl, MediaUrlList, MediaUrlOpt, UtcDatetime
-from app.utils.geo import coarsen
 
 
 class PhotoAdjust(BaseModel):
@@ -55,10 +54,6 @@ class MatchCheckRequest(BaseModel):
     eye_color: str | None = None
     body_size: str | None = None
     breed: str | None = None
-
-    # Match on the same grid the sighting will be stored on, so the candidates
-    # offered here are the ones the committed sighting would actually sit near.
-    _coarsen = field_validator("latitude", "longitude")(coarsen)
 
 
 class MatchCheckResponse(BaseModel):
@@ -191,9 +186,9 @@ class SightingCommit(BaseModel):
     """
     cat_id: int | None = None
     photo_path: str
-    # Coarsened here, at the boundary, so nothing downstream can persist the
-    # precise point — create_sighting copies these onto the Sighting, the Cat's
-    # last_lat/last_lng, and the mirrored ExplorerPost, and all three are public.
+    # Stored as reported — create_sighting copies these onto the Sighting, the
+    # Cat's last_lat/last_lng, and the mirrored ExplorerPost. The bounds are
+    # input validation only; the value itself is never adjusted.
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
     spotter_name: str | None = None
@@ -211,5 +206,3 @@ class SightingCommit(BaseModel):
     frame_id: str | None = None
     photo_adjust: PhotoAdjust | None = None
     caption: str | None = None
-
-    _coarsen = field_validator("latitude", "longitude")(coarsen)

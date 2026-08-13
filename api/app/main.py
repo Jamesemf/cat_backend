@@ -382,35 +382,6 @@ with engine.connect() as _conn:
         WHERE NOT EXISTS (SELECT 1 FROM explorer_posts p WHERE p.sighting_id = s.id)
     """))
     _conn.commit()
-    # Coarsen coordinates stored before utils/geo.py existed. New writes are
-    # snapped at the schema boundary, but rows written earlier still hold the
-    # raw GPS fix the device reported — which, for a cat photographed at home,
-    # is a house. Rounding is what the write path now does, so this simply
-    # brings history onto the same grid; it is lossy and deliberately so.
-    #
-    # The WHERE clause makes repeat runs a no-op (and doubles as a self-heal if
-    # a precise coordinate ever reaches a column again). Postgres has no
-    # round(double precision, int), hence the numeric cast there.
-    _round = (
-        "ROUND(CAST({col} AS NUMERIC), 3)"
-        if engine.dialect.name != "sqlite"
-        else "ROUND({col}, 3)"
-    )
-    for _table, _lat, _lng in (
-        ("sightings", "latitude", "longitude"),
-        ("explorer_posts", "latitude", "longitude"),
-        ("cats", "last_lat", "last_lng"),
-    ):
-        _rlat = _round.format(col=_lat)
-        _rlng = _round.format(col=_lng)
-        _conn.execute(_text(f"""
-            UPDATE {_table}
-               SET {_lat} = {_rlat},
-                   {_lng} = {_rlng}
-             WHERE ({_lat} IS NOT NULL AND {_lat} <> {_rlat})
-                OR ({_lng} IS NOT NULL AND {_lng} <> {_rlng})
-        """))
-        _conn.commit()
 
 with SessionLocal() as _seed_db:
     try:
