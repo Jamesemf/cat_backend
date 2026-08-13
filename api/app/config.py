@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     storage_reconcile_enabled: bool = True
     storage_reconcile_interval_hours: int = 6
     storage_orphan_grace_hours: int = 24
+    # How long a rejected/revoked claim's photos survive the decision. Those
+    # photos show the claimant at home, so this is a published promise, not a
+    # tuning knob — see services/retention.py and the privacy policy.
+    claim_photo_retention_days: int = 90
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-haiku-4-5"
     # Transactional email (Resend). When resend_api_key is empty, email sending

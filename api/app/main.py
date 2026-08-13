@@ -24,6 +24,7 @@ from app.routers import (
     users,
 )
 from app.services.reconcile import reconcile
+from app.services.retention import sweep_claim_photos, sweep_rate_limit_counters
 from app.services.demo_seed import seed_apple_review_demo
 from app.utils.rarity import compute_rarity_score
 
@@ -380,6 +381,35 @@ with engine.connect() as _conn:
         WHERE NOT EXISTS (SELECT 1 FROM explorer_posts p WHERE p.sighting_id = s.id)
     """))
     _conn.commit()
+    # Coarsen coordinates stored before utils/geo.py existed. New writes are
+    # snapped at the schema boundary, but rows written earlier still hold the
+    # raw GPS fix the device reported — which, for a cat photographed at home,
+    # is a house. Rounding is what the write path now does, so this simply
+    # brings history onto the same grid; it is lossy and deliberately so.
+    #
+    # The WHERE clause makes repeat runs a no-op (and doubles as a self-heal if
+    # a precise coordinate ever reaches a column again). Postgres has no
+    # round(double precision, int), hence the numeric cast there.
+    _round = (
+        "ROUND(CAST({col} AS NUMERIC), 3)"
+        if engine.dialect.name != "sqlite"
+        else "ROUND({col}, 3)"
+    )
+    for _table, _lat, _lng in (
+        ("sightings", "latitude", "longitude"),
+        ("explorer_posts", "latitude", "longitude"),
+        ("cats", "last_lat", "last_lng"),
+    ):
+        _rlat = _round.format(col=_lat)
+        _rlng = _round.format(col=_lng)
+        _conn.execute(_text(f"""
+            UPDATE {_table}
+               SET {_lat} = {_rlat},
+                   {_lng} = {_rlng}
+             WHERE ({_lat} IS NOT NULL AND {_lat} <> {_rlat})
+                OR ({_lng} IS NOT NULL AND {_lng} <> {_rlng})
+        """))
+        _conn.commit()
 
 with SessionLocal() as _seed_db:
     try:
@@ -437,9 +467,31 @@ async def _storage_reconcile_loop() -> None:
         await asyncio.sleep(interval)
 
 
+async def _retention_sweep_loop() -> None:
+    """Delete personal data past its stated retention period. Daily.
+
+    Deliberately not gated on storage_reconcile_enabled: reconciliation is
+    housekeeping an operator may switch off, whereas this enforces the retention
+    period the privacy policy publishes. Runs once at startup, then daily.
+    """
+    while True:
+        db = SessionLocal()
+        try:
+            sweep_claim_photos(db, retain_days=settings.claim_photo_retention_days)
+            sweep_rate_limit_counters(db)
+        except Exception:
+            log.exception("Retention sweep failed")
+        finally:
+            db.close()
+        await asyncio.sleep(86_400)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    tasks = [asyncio.create_task(_rarity_recompute_loop())]
+    tasks = [
+        asyncio.create_task(_rarity_recompute_loop()),
+        asyncio.create_task(_retention_sweep_loop()),
+    ]
     if settings.storage_reconcile_enabled:
         tasks.append(asyncio.create_task(_storage_reconcile_loop()))
     yield

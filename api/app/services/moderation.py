@@ -32,6 +32,12 @@ log = logging.getLogger(__name__)
 # Offense 1 and 2 warn; offense 3 bans.
 BAN_STRIKE_COUNT = 3
 
+# Where a user contests a strike. Strikes are applied by the vision model with
+# no human in the loop, and the third one locks the account out of the whole
+# app, so every message that reports a strike has to carry a route to a person —
+# that route is the only human review in this pipeline.
+APPEAL_EMAIL = "support@catapp.uk"
+
 # Distinct open reports that hide a post pending review. Low enough to react
 # quickly on a small user base, high enough that one person can't hide a post
 # they dislike (and the unique constraint on post_reports stops them trying).
@@ -104,13 +110,15 @@ def register_content_strike(db: Session, user: User, reason: str | None) -> str:
 
     if user.banned_at is not None:
         return (
-            "This photo contains content that isn't allowed. Your account has "
-            "been banned for repeated violations."
+            "Our automated check flagged this photo as content that isn't allowed. "
+            "Your account has been banned for repeated violations. No person "
+            f"reviewed this before the ban — if it's wrong, email {APPEAL_EMAIL} "
+            "and we'll look at it ourselves."
         )
     remaining = BAN_STRIKE_COUNT - strikes
     return (
-        "This photo contains content that isn't allowed. "
+        "Our automated check flagged this photo as content that isn't allowed. "
         f"Warning {strikes} of {BAN_STRIKE_COUNT - 1} — "
         f"{remaining} more violation{'s' if remaining != 1 else ''} and your "
-        "account will be banned."
+        f"account will be banned. If this is wrong, email {APPEAL_EMAIL}."
     )
