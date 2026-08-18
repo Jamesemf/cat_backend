@@ -36,7 +36,13 @@ class MatchCandidate(BaseModel):
     cat_id: int
     name: str | None
     breed: str | None
+    # The cat's newest photo. Superseded by `photos`, but kept for clients
+    # shipped before the pager existed — dropping it blanks their thumbnails.
     last_photo_path: MediaUrlOpt
+    # Recent photos, newest first, so the user can flick through and tell
+    # look-alikes apart rather than judging one 52px thumbnail. Excludes photos
+    # whose Explorer post has been hidden.
+    photos: MediaUrlList = []
     last_seen: UtcDatetime
     sighting_count: int
     confidence: float

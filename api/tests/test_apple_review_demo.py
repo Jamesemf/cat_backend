@@ -347,9 +347,15 @@ def test_reviewer_can_recognise_a_seeded_cat_when_spotting(client):
         "breed": "Orange Tabby",
     }
     as_reviewer = client.post("/sightings/match-check", json=body, headers=headers).json()
-    assert biscuit["id"] in {c["cat_id"] for c in as_reviewer["candidates"]}
+    by_id = {c["cat_id"]: c for c in as_reviewer["candidates"]}
+    assert biscuit["id"] in by_id
 
-    # A real user standing in the same spot is offered nothing seeded.
+    # The candidate arrives with photos to swipe through, not just a thumbnail —
+    # the reviewer has to be able to tell Biscuit from the other seeded tabby.
+    assert by_id[biscuit["id"]]["photos"]
+
+    # A real user standing in the same spot is offered nothing seeded — which is
+    # also the proof that no seeded photo leaks through the new list.
     anonymous = client.post("/sightings/match-check", json=body).json()
     assert anonymous["candidates"] == []
 

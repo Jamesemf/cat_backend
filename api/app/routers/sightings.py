@@ -52,6 +52,12 @@ router = APIRouter(prefix="/sightings", tags=["sightings"])
 MAX_PHOTO_BYTES = 5 * 1024 * 1024
 MAX_SIGHTINGS_PER_DAY = 10
 
+# How many recent photos of each match candidate go out with /match-check. The
+# client shows them as a swipeable pager so two look-alike cats can be told
+# apart. A constant, not a query param: this endpoint is a POST with a JSON body
+# and exactly one caller, so a knob would only be one more thing to clamp.
+MATCH_CANDIDATE_PHOTOS = 8
+
 
 @router.post("/analyze", response_model=SightingAnalysis)
 async def analyze_photo(
@@ -175,12 +181,52 @@ def match_check(
         query=visible_cats_query(db.query(Cat), current_user),
     )
 
+    # Recent photos per candidate, batched — one query for all of them rather
+    # than one per cat. Copies the /cats/nearby carousel query (cats.list_cats_
+    # nearby), including its hidden-post filter: one moderation decision has to
+    # cover every surface the photo shows up on.
+    #
+    # Scoping is already handled by `ids` coming from a visible_cats_query
+    # result above, so a demo cat can never reach the IN clause. The sighting
+    # scope on top is belt-and-braces for admin merge, which reparents sightings
+    # between cats and could otherwise leave demo rows on a visible cat.
+    ids = [cat.id for cat, _ in matches]
+    by_cat: dict[int, list[str]] = {}
+    if ids:
+        rows = (
+            visible_sightings_query(
+                db.query(Sighting.cat_id, Sighting.photo_path), current_user
+            )
+            .filter(
+                Sighting.cat_id.in_(ids),
+                Sighting.photo_path.isnot(None),
+                ~sighting_has_hidden_post(),
+            )
+            # id breaks spotted_at ties so the order is stable across databases.
+            .order_by(Sighting.spotted_at.desc(), Sighting.id.desc())
+            .all()
+        )
+        for cid, path in rows:
+            lst = by_cat.setdefault(cid, [])
+            # The seed writes a cat's two sightings with one photo_path, and a
+            # merge can leave real duplicates — the same picture twice under two
+            # dots reads as a broken pager.
+            if len(lst) < MATCH_CANDIDATE_PHOTOS and path not in lst:
+                lst.append(path)
+
     candidates = [
         MatchCandidate(
             cat_id=cat.id,
             name=cat.name,
             breed=cat.breed,
             last_photo_path=cat.last_photo_path,
+            # No last_photo_path fallback for an empty bucket, unlike
+            # /cats/nearby: that endpoint lists cats registered by claim, which
+            # legitimately have no sightings, whereas a candidate must have a
+            # last_lat and only a sighting commit sets one. So empty here means
+            # every photo was moderated away, and falling back would put the
+            # hidden one straight back on screen.
+            photos=by_cat.get(cat.id, []),
             last_seen=cat.last_seen,
             sighting_count=cat.sighting_count,
             confidence=score,
