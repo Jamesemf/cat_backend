@@ -7,6 +7,7 @@ from app.db.session import get_db
 from app.models.notification import Notification, PushToken
 from app.models.user import User
 from app.schemas.notification import (
+    DeleteIn,
     MarkReadIn,
     NotificationOut,
     NotificationPrefs,
@@ -86,6 +87,28 @@ def mark_read(
     )
     db.commit()
     return {"updated": updated}
+
+
+@router.delete("")
+def delete_notifications(
+    body: DeleteIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Clear inbox rows — ``all`` empties the inbox, otherwise just ``ids``.
+
+    Only the caller's own rows are ever in scope, so ids belonging to someone
+    else (or already gone) are silently no-ops. The cats, sightings and posts a
+    notification points at are untouched; this drops the inbox row alone.
+    """
+    query = db.query(Notification).filter(Notification.user_id == current_user.id)
+    if not body.all:
+        if not body.ids:
+            return {"deleted": 0}
+        query = query.filter(Notification.id.in_(body.ids))
+    deleted = query.delete(synchronize_session=False)
+    db.commit()
+    return {"deleted": deleted}
 
 
 @router.get("/preferences", response_model=NotificationPrefs)

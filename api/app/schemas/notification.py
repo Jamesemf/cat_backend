@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.schemas.media import MediaUrlOpt, UtcDatetime, UtcDatetimeOpt
 
@@ -35,6 +35,13 @@ class PushTokenIn(BaseModel):
 
 class MarkReadIn(BaseModel):
     ids: list[int] | None = None
+    all: bool = False
+
+
+class DeleteIn(BaseModel):
+    """Inbox rows to remove — ``all`` empties it, otherwise just ``ids``."""
+
+    ids: list[int] | None = Field(default=None, max_length=500)
     all: bool = False
 
 
