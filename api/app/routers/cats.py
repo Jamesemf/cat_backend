@@ -523,14 +523,17 @@ def list_my_cats(
 
     # `Cat.last_photo_path` is whoever photographed the cat last — frequently
     # another spotter. Swap in this user's own photo (their chosen highlight, else
-    # their latest) so a Cat-a-log card only ever shows a photo they took.
+    # their latest) so a Cat-a-log card only ever shows a photo they took, with
+    # the date that photo was taken for the card's stamp.
     photos = own_cover_photos(
         db, current_user.id, cat_ids, parse_covers(current_user.catalog_layout)
     )
     out: list[CatOut] = []
     for c in cats:
         co = CatOut.model_validate(c)
-        co.last_photo_path = photos.get(c.id)
+        cover = photos.get(c.id)
+        co.last_photo_path = cover.path if cover else None
+        co.cover_spotted_at = cover.spotted_at if cover else None
         out.append(co)
     return out
 

@@ -166,7 +166,9 @@ def get_public_profile(
     cat_out: list[CatOut] = []
     for c in cats:
         co = CatOut.model_validate(c)
-        co.last_photo_path = photos.get(c.id)
+        cover = photos.get(c.id)
+        co.last_photo_path = cover.path if cover else None
+        co.cover_spotted_at = cover.spotted_at if cover else None
         cat_out.append(co)
 
     tiles_explored = (

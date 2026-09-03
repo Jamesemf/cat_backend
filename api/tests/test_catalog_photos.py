@@ -1,4 +1,4 @@
-"""A Cat-a-log card only ever shows a photo its owner took.
+"""A Cat-a-log card only ever shows a photo its owner took, stamped with its date.
 
 `cats.last_photo_path` is global — the most recent photo of that cat by anyone —
 so serving it straight from `GET /cats/mine` put another spotter's photo on your
@@ -6,6 +6,11 @@ card as soon as they photographed a cat you'd already logged. Cards now resolve
 through `own_cover_photos`: the highlight the owner picked if it's still one of
 theirs, else their own latest. Same on the public profile, where an unvalidated
 cover could additionally point a card at an arbitrary storage key.
+
+`cats.last_seen` is global in exactly the same way, and the card stamps a date
+under the print — so the stamp read the cat's latest sighting by anyone rather
+than the day the card's own photo was taken, and it ignored a highlight pointing
+at an older photo. `cover_spotted_at` dates the photo the card actually shows.
 """
 
 import json
@@ -24,7 +29,7 @@ from app.models.cat import Cat
 from app.models.sighting import Sighting
 from app.models.user import User
 from app.services.auth_service import create_access_token, hash_password
-from app.services.catalog import own_cover_photos, parse_covers
+from app.services.catalog import CoverPhoto, own_cover_photos, parse_covers
 from app.services.storage import LocalStorage, set_storage
 
 
@@ -82,6 +87,12 @@ def _make_cat(session, last_photo_path=None, name="Whiskers"):
     session.commit()
     session.refresh(cat)
     return cat
+
+
+def _dt(iso: str) -> datetime:
+    """An API timestamp (ISO-8601, always zoned) as the naive UTC the DB stores,
+    so it can be compared against a Sighting's own spotted_at."""
+    return datetime.fromisoformat(iso).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _make_sighting(session, user_id, cat_id, photo_path, days_ago=0):
@@ -217,6 +228,89 @@ def test_own_cover_photos_ignores_cats_with_no_photo_of_mine(db):
     _make_sighting(db, them.id, cat.id, "uploads/theirs.jpg")
 
     assert own_cover_photos(db, me.id, [cat.id], {}) == {cat.id: None}
+
+
+def test_own_cover_photos_dates_each_photo_by_its_own_sighting(db):
+    """The resolved cover carries the spotted_at of the sighting it came from."""
+    me = _make_user(db, "me@example.com")
+    cat = _make_cat(db)
+    old = _make_sighting(db, me.id, cat.id, "uploads/old.jpg", days_ago=40)
+    new = _make_sighting(db, me.id, cat.id, "uploads/new.jpg", days_ago=1)
+
+    fallback = own_cover_photos(db, me.id, [cat.id], {})[cat.id]
+    assert fallback == CoverPhoto("uploads/new.jpg", new.spotted_at)
+
+    chosen = own_cover_photos(db, me.id, [cat.id], {str(cat.id): "uploads/old.jpg"})
+    assert chosen == {cat.id: CoverPhoto("uploads/old.jpg", old.spotted_at)}
+
+
+def test_own_cover_photos_dates_a_reused_key_by_its_latest_sighting(db):
+    """The same photo key logged twice takes the date of the later sighting."""
+    me = _make_user(db, "me@example.com")
+    cat = _make_cat(db)
+    _make_sighting(db, me.id, cat.id, "uploads/same.jpg", days_ago=9)
+    later = _make_sighting(db, me.id, cat.id, "uploads/same.jpg", days_ago=2)
+
+    resolved = own_cover_photos(db, me.id, [cat.id], {str(cat.id): "uploads/same.jpg"})
+    assert resolved == {cat.id: CoverPhoto("uploads/same.jpg", later.spotted_at)}
+
+
+def test_my_catalog_stamps_the_date_my_photo_was_taken_not_the_cats(client):
+    """The reported bug: another spotter logs the cat today, so `last_seen` moves
+    and my card's stamp jumped forward while my photo stayed where it was."""
+    session = client.Session()
+    me = _make_user(session, "me@example.com")
+    them = _make_user(session, "them@example.com")
+    cat = _make_cat(session)
+    mine = _make_sighting(session, me.id, cat.id, "uploads/mine.jpg", days_ago=30)
+    _make_sighting(session, them.id, cat.id, "uploads/theirs.jpg", days_ago=0)
+    cat.last_seen = datetime.now(timezone.utc)
+    session.commit()
+    mine_taken = mine.spotted_at
+    headers = _auth(me)
+    session.close()
+
+    card = client.get("/cats/mine", headers=headers).json()[0]
+    assert card["last_photo_path"] == "uploads/mine.jpg"
+    assert _dt(card["cover_spotted_at"]) == mine_taken
+    # And it really is a different date from the one the card used to stamp.
+    assert _dt(card["cover_spotted_at"]) != _dt(card["last_seen"])
+
+
+def test_my_catalog_stamps_a_chosen_highlights_own_date(client):
+    """Highlighting an older photo of my own moves the stamp back with it — this
+    one needs no second spotter to reproduce."""
+    session = client.Session()
+    me = _make_user(session, "me@example.com")
+    cat = _make_cat(session)
+    old = _make_sighting(session, me.id, cat.id, "uploads/old.jpg", days_ago=200)
+    _make_sighting(session, me.id, cat.id, "uploads/new.jpg", days_ago=1)
+    me.catalog_layout = json.dumps({"covers": {str(cat.id): "uploads/old.jpg"}})
+    session.commit()
+    old_taken = old.spotted_at
+    headers = _auth(me)
+    session.close()
+
+    card = client.get("/cats/mine", headers=headers).json()[0]
+    assert card["last_photo_path"] == "uploads/old.jpg"
+    assert _dt(card["cover_spotted_at"]) == old_taken
+
+
+def test_public_profile_stamps_that_spotters_own_photo_date(client):
+    """Someone else's Cat-a-log dates their cards by their photos, not the cat."""
+    session = client.Session()
+    me = _make_user(session, "me@example.com")
+    them = _make_user(session, "them@example.com")
+    cat = _make_cat(session, last_photo_path="uploads/mine.jpg")
+    theirs = _make_sighting(session, them.id, cat.id, "uploads/theirs.jpg", days_ago=60)
+    _make_sighting(session, me.id, cat.id, "uploads/mine.jpg", days_ago=1)
+    theirs_taken = theirs.spotted_at
+    them_id = them.id
+    session.close()
+
+    card = client.get(f"/users/{them_id}").json()["cats"][0]
+    assert card["last_photo_path"] == "uploads/theirs.jpg"
+    assert _dt(card["cover_spotted_at"]) == theirs_taken
 
 
 def test_parse_covers_tolerates_corrupt_layouts():

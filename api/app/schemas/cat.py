@@ -106,6 +106,11 @@ class CatOut(CatBase):
     last_lat: float | None
     last_lng: float | None
     last_photo_path: MediaUrlOpt = None
+    # When `last_photo_path` was taken — what the Cat-a-log stamp reads. Not
+    # `last_seen`: that is the whole cat's latest sighting by anyone, so it dates
+    # the card's photo only by coincidence. Null only where there is no photo to
+    # date (the card draws its procedural face and stamps `last_seen` instead).
+    cover_spotted_at: UtcDatetimeOpt = None
     vibes: str | None = None
 
     is_cat: bool | None = None
