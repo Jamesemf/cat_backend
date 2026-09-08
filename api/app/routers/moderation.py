@@ -40,6 +40,7 @@ from app.models.cat import Cat
 from app.models.claim import CatClaim, ClaimPhoto
 from app.models.explorer import ExplorerPost, PostReport
 from app.models.notification import Notification
+from app.models.trait_change import TraitChangeRequest
 from app.models.user import User
 from app.schemas.claim import (
     ClaimPhotoOut,
@@ -52,6 +53,14 @@ from app.schemas.explorer import (
     ReportedPostOut,
     ReportOut,
 )
+from app.schemas.trait_change import (
+    TRAIT_FIELDS,
+    RejectTraitChangeIn,
+    TraitChangeApplyIn,
+    TraitChangeQueueItem,
+    TraitChangeResult,
+    validate_trait_values,
+)
 from app.routers.media import serve_upload
 from app.services.auth_service import require_admin
 from app.services.content_deletion import purge_post, safe_unlink
@@ -63,15 +72,8 @@ log = logging.getLogger(__name__)
 
 # The seven controlled-vocabulary fields the reviewer compares by eye. Same set
 # utils.matching weights for sighting Re-ID — but here they are shown, not scored.
-COMPARED_FEATURES = (
-    "primary_color",
-    "secondary_color",
-    "pattern",
-    "fur_length",
-    "eye_color",
-    "body_size",
-    "breed",
-)
+# Also the set a trait change request may touch, which is where it now lives.
+COMPARED_FEATURES = TRAIT_FIELDS
 
 router = APIRouter(prefix="/moderation", tags=["moderation"])
 
@@ -671,3 +673,227 @@ def revoke_claim(
         claim.id, admin.id, claim.user_id,
     )
     return ClaimReviewResult(claim_id=claim.id, status=claim.status, cat_id=claim.cat_id)
+
+
+# ---------------------------------------------------------------------------
+# Trait change requests
+#
+# A cat's traits are written once by vision and never revisited, so this third
+# queue is for people saying the record is wrong. Unlike the other two, the
+# moderator doesn't merely accept or refuse: they submit the values themselves,
+# seeded with the proposal. A well-meant but half-right suggestion is worth
+# correcting rather than bouncing.
+# ---------------------------------------------------------------------------
+
+
+def _get_trait_request_or_404(db: Session, request_id: int) -> TraitChangeRequest:
+    request = (
+        db.query(TraitChangeRequest).filter(TraitChangeRequest.id == request_id).first()
+    )
+    if not request:
+        raise HTTPException(status_code=404, detail="That request no longer exists.")
+    return request
+
+
+def _traits_of(raw: str | None) -> dict:
+    """Parse a stored proposal, keeping only real trait keys."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {k: v for k, v in parsed.items() if k in TRAIT_FIELDS}
+
+
+def _trait_item(
+    request: TraitChangeRequest, owner_user_ids: set[int]
+) -> TraitChangeQueueItem:
+    cat = request.cat
+    return TraitChangeQueueItem(
+        request_id=request.id,
+        status=request.status,
+        created_at=request.created_at,
+        decided_at=request.decided_at,
+        requester_id=request.user_id,
+        requester_name=request.user.display_name if request.user else None,
+        # Surfaced for the same reason ReportedPostOut carries author_strikes:
+        # a history of harmful uploads is context for whether to trust this.
+        requester_strikes=request.user.content_strikes if request.user else 0,
+        requester_banned=bool(request.user and request.user.banned_at is not None),
+        is_owner=request.user_id in owner_user_ids,
+        cat_id=request.cat_id,
+        cat_name=cat.name if cat else None,
+        cat_photo_path=cat.last_photo_path if cat else None,
+        current={k: getattr(cat, k, None) for k in TRAIT_FIELDS} if cat else {},
+        proposed=_traits_of(request.proposed_json),
+        applied=_traits_of(request.applied_json) if request.applied_json else None,
+        note=request.note,
+        rejection_reason=request.rejection_reason,
+        reviewed_by_name=request.reviewed_by.display_name if request.reviewed_by else None,
+    )
+
+
+@router.get("/trait-changes", response_model=list[TraitChangeQueueItem])
+def list_trait_changes(
+    limit: int = 50,
+    offset: int = 0,
+    include_resolved: bool = False,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """The trait correction queue, oldest first.
+
+    Oldest-first like the claims queue rather than worst-first like reports:
+    there is no severity here, only people waiting on an answer.
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    q = db.query(TraitChangeRequest).options(
+        joinedload(TraitChangeRequest.cat),
+        joinedload(TraitChangeRequest.user),
+        joinedload(TraitChangeRequest.reviewed_by),
+    )
+    if not include_resolved:
+        q = q.filter(TraitChangeRequest.status == "pending")
+
+    rows = (
+        q.order_by(TraitChangeRequest.created_at.asc()).offset(offset).limit(limit).all()
+    )
+    # A request whose cat has since been deleted has nothing left to correct.
+    rows = [r for r in rows if r.cat is not None]
+
+    # Which of these requesters own the cat they're correcting, resolved in one
+    # query rather than one per row. Ownership is a badge here, not authority.
+    owner_user_ids: set[int] = set()
+    if rows:
+        owners = dict(
+            db.query(CatClaim.cat_id, CatClaim.user_id)
+            .filter(
+                CatClaim.cat_id.in_({r.cat_id for r in rows}),
+                CatClaim.status == "verified",
+            )
+            .all()
+        )
+        owner_user_ids = {r.user_id for r in rows if owners.get(r.cat_id) == r.user_id}
+
+    return [_trait_item(r, owner_user_ids) for r in rows]
+
+
+@router.post("/trait-changes/{request_id}/apply", response_model=TraitChangeResult)
+def apply_trait_change(
+    request_id: int,
+    body: TraitChangeApplyIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Write the moderator's values onto the cat.
+
+    `body.values` is what the moderator settled on, which is not necessarily
+    what was proposed — the dashboard seeds the form with the suggestion and
+    lets them fix it first. Both are kept on the row.
+
+    `features_json` is deliberately left alone: it is the raw record of what
+    vision saw, not a claim about what is currently true.
+    """
+    request = _get_trait_request_or_404(db, request_id)
+    if request.status != "pending":
+        raise HTTPException(
+            status_code=409, detail=f"This request was already {request.status}."
+        )
+
+    cat = db.query(Cat).filter(Cat.id == request.cat_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="That cat no longer exists.")
+
+    values = body.values or {}
+    validate_trait_values(values)
+
+    applied = {k: v for k, v in values.items() if getattr(cat, k, None) != v}
+    for field, value in applied.items():
+        setattr(cat, field, value)
+
+    request.status = "applied"
+    request.applied_json = json.dumps(applied)
+    request.reviewed_by_id = admin.id
+    request.decided_at = datetime.now(timezone.utc)
+
+    cat_label = cat.name or "a cat"
+    title = f"Your suggestion for {cat_label} was applied"
+    # A moderator can agree with the report and still change nothing, if someone
+    # else fixed the record first. Saying "applied" then would be a small lie.
+    message = (
+        "Thanks — the traits you suggested are now on their profile."
+        if applied
+        else "Thanks for flagging it. A moderator checked, and the record was already right."
+    )
+    db.add(
+        Notification(
+            user_id=request.user_id,
+            type="trait_change_applied",
+            title=title,
+            body=message,
+            cat_id=cat.id,
+        )
+    )
+    db.commit()
+
+    # Only once the change is durable.
+    background_tasks.add_task(
+        push_to_user, request.user_id, title, message, {"cat_id": cat.id}
+    )
+    log.info(
+        "Trait change %s applied by moderator %s (%s field(s) changed on cat %s)",
+        request.id, admin.id, len(applied), cat.id,
+    )
+    return TraitChangeResult(request_id=request.id, status=request.status, cat_id=cat.id)
+
+
+@router.post("/trait-changes/{request_id}/reject", response_model=TraitChangeResult)
+def reject_trait_change(
+    request_id: int,
+    body: RejectTraitChangeIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Turn a suggestion down. The cat is left exactly as it was."""
+    request = _get_trait_request_or_404(db, request_id)
+    if request.status != "pending":
+        raise HTTPException(
+            status_code=409, detail=f"This request was already {request.status}."
+        )
+
+    reason = (body.reason or "").strip() or (
+        "A moderator checked this cat's record and left it as it was."
+    )
+    cat_label = request.cat.name if request.cat else "this cat"
+
+    request.status = "rejected"
+    request.rejection_reason = reason
+    request.reviewed_by_id = admin.id
+    request.decided_at = datetime.now(timezone.utc)
+
+    title = f"Your suggestion for {cat_label} wasn't applied"
+    db.add(
+        Notification(
+            user_id=request.user_id,
+            type="trait_change_rejected",
+            title=title,
+            body=reason,
+            cat_id=request.cat_id,
+        )
+    )
+    db.commit()
+
+    background_tasks.add_task(
+        push_to_user, request.user_id, title, reason, {"cat_id": request.cat_id}
+    )
+    log.info("Trait change %s rejected by moderator %s", request.id, admin.id)
+    return TraitChangeResult(
+        request_id=request.id, status=request.status, cat_id=request.cat_id
+    )
