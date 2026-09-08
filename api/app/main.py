@@ -21,6 +21,7 @@ from app.routers import (
     moderation,
     notifications,
     sightings,
+    trait_changes,
     users,
 )
 from app.middleware import add_security_headers
@@ -509,6 +510,7 @@ app.include_router(media.router)  # serves /uploads/* (local file or S3 redirect
 app.include_router(auth.router, prefix="/auth")
 app.include_router(sightings.router)
 app.include_router(claims.router)
+app.include_router(trait_changes.router)
 app.include_router(notifications.router)
 app.include_router(cats.router)
 app.include_router(explorer.router)

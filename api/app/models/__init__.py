@@ -7,6 +7,7 @@ from app.models.notification import Notification, PushToken
 from app.models.password_reset import PasswordReset
 from app.models.rate_limit import DailyUsage
 from app.models.sighting import Sighting
+from app.models.trait_change import TraitChangeRequest
 from app.models.user import User
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "PostReport",
     "PushToken",
     "Sighting",
+    "TraitChangeRequest",
     "User",
 ]
