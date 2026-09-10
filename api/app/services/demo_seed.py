@@ -28,8 +28,10 @@ from app.models.exploration import ExploredTile
 from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
 from app.models.notification import Notification, PushToken
 from app.models.sighting import Sighting
+from app.models.trait_change import TraitChangeRequest
 from app.models.user import User
 from app.services.auth_service import hash_password
+from app.services.cat_merge import detach_cat_from_merge_requests
 from app.services.content_deletion import purge_post, safe_unlink
 from app.utils.matching import haversine_km
 from app.utils.rarity import compute_rarity_score
@@ -400,6 +402,16 @@ def _purge_seeded_content(db: Session) -> None:
         if claim_ids:
             db.query(ClaimPhoto).filter(ClaimPhoto.claim_id.in_(claim_ids)).delete(synchronize_session=False)
             db.query(CatClaim).filter(CatClaim.id.in_(claim_ids)).delete(synchronize_session=False)
+        # Moderation requests a person filed *about* a seeded cat. Not seed rows,
+        # but they point at one, and cat_id on a trait request is NOT NULL — left
+        # behind, they don't merely dangle, they make the delete below fail and
+        # take startup down with it on Postgres. Handled exactly as delete_cat
+        # does: suggestions go, duplicate reports are let go of.
+        db.query(TraitChangeRequest).filter(
+            TraitChangeRequest.cat_id.in_(demo_cat_ids)
+        ).delete(synchronize_session=False)
+        for cat_id in demo_cat_ids:
+            detach_cat_from_merge_requests(db, cat_id)
         db.query(Cat).filter(Cat.id.in_(demo_cat_ids)).delete(synchronize_session=False)
     db.flush()
 

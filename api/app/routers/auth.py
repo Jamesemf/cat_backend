@@ -492,8 +492,10 @@ def delete_me(
     """
     from app.models.claim import CatClaim, ClaimPhoto
     from app.models.cat import Cat
+    from app.models.cat_merge import CatMergeRequest
     from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
     from app.models.notification import Notification, PushToken
+    from app.models.trait_change import TraitChangeRequest
     from app.services.content_deletion import delete_cat, delete_post_dependents, safe_unlink
 
     uid = current_user.id
@@ -537,6 +539,24 @@ def delete_me(
     # decisions above — without this the FK points at a deleted user row.
     db.query(CatClaim).filter(CatClaim.reviewed_by_id == uid).update(
         {CatClaim.reviewed_by_id: None}, synchronize_session=False
+    )
+    db.query(TraitChangeRequest).filter(TraitChangeRequest.reviewed_by_id == uid).update(
+        {TraitChangeRequest.reviewed_by_id: None}, synchronize_session=False
+    )
+    db.query(CatMergeRequest).filter(CatMergeRequest.reviewed_by_id == uid).update(
+        {CatMergeRequest.reviewed_by_id: None}, synchronize_session=False
+    )
+
+    # Their own trait suggestions go with them: cat_id and user_id are both NOT
+    # NULL there, so there is no anonymous form for one to survive in.
+    db.query(TraitChangeRequest).filter(TraitChangeRequest.user_id == uid).delete(
+        synchronize_session=False
+    )
+    # Duplicate reports stay, anonymously. Unlike a claim, one isn't a request
+    # for something the departing user gets — it's an observation about two
+    # profiles, and it is just as true once they've gone.
+    db.query(CatMergeRequest).filter(CatMergeRequest.user_id == uid).update(
+        {CatMergeRequest.user_id: None}, synchronize_session=False
     )
 
     # 4. Claims (all statuses) and their evidence photos. Verified claims

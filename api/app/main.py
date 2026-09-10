@@ -13,6 +13,7 @@ from app.db.session import Base, SessionLocal, engine
 from app.models.cat import Cat
 from app.routers import (
     auth,
+    cat_merges,
     cats,
     claims,
     exploration,
@@ -511,6 +512,7 @@ app.include_router(auth.router, prefix="/auth")
 app.include_router(sightings.router)
 app.include_router(claims.router)
 app.include_router(trait_changes.router)
+app.include_router(cat_merges.router)
 app.include_router(notifications.router)
 app.include_router(cats.router)
 app.include_router(explorer.router)
