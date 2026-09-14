@@ -1,4 +1,5 @@
 from app.models.cat import Cat
+from app.models.cat_merge import CatMergeRequest
 from app.models.claim import CatClaim, ClaimPhoto
 from app.models.email_verification import EmailVerification
 from app.models.exploration import ExploredTile
@@ -13,6 +14,7 @@ from app.models.user import User
 __all__ = [
     "Cat",
     "CatClaim",
+    "CatMergeRequest",
     "ClaimPhoto",
     "DailyUsage",
     "EmailVerification",

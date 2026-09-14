@@ -34,6 +34,7 @@ from app.schemas.cat import (
 )
 from app.schemas.claim import INDOOR_OUTDOOR_VALUES, RegisterResult
 from app.services.auth_service import get_current_user, get_optional_user, require_admin
+from app.services.cat_merge import merge_cat_into
 from app.services.catalog import own_cover_photos, parse_covers
 from app.services.claim_verification import (
     MAX_CLAIM_ATTEMPTS_PER_DAY,
@@ -323,92 +324,19 @@ def merge_cats(
     When a missed Re-ID match creates a second cat for the same animal, this
     folds the duplicate back in: every sighting, Explorer post, claim and
     notification moves to the target, the target's aggregates are recomputed,
-    and the source cat is removed. Requires a signed-in user; this is a
-    maintenance action that should be restricted to admins before production.
+    and the source cat is removed.
+
+    The direct maintenance route. The same merge reached through a user's
+    report is decided in /moderation/merges, and both run the identical
+    services.cat_merge code.
     """
     target_id = body.target_id
-    if source_id == target_id:
-        raise HTTPException(status_code=400, detail="A cat can't be merged into itself.")
-
     source = db.query(Cat).filter(Cat.id == source_id).first()
     target = db.query(Cat).filter(Cat.id == target_id).first()
     if not source or not target:
         raise HTTPException(status_code=404, detail="Cat not found.")
 
-    # Two verified owners can't collapse onto one cat (one verified claim per cat).
-    src_verified = (
-        db.query(CatClaim)
-        .filter(CatClaim.cat_id == source_id, CatClaim.status == "verified")
-        .count()
-    )
-    tgt_verified = (
-        db.query(CatClaim)
-        .filter(CatClaim.cat_id == target_id, CatClaim.status == "verified")
-        .count()
-    )
-    if src_verified and tgt_verified:
-        raise HTTPException(
-            status_code=409,
-            detail="Both cats have a verified owner; resolve ownership before merging.",
-        )
-
-    # Pending claims can't be carried across a merge. Reassigning one would put
-    # photos of the source cat in front of a moderator judging them against the
-    # target's record, and if either side is already verified, approving the
-    # moved claim afterwards would collide with it.
-    pending = (
-        db.query(CatClaim)
-        .filter(
-            CatClaim.cat_id.in_((source_id, target_id)),
-            CatClaim.status == "pending",
-        )
-        .count()
-    )
-    if pending:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"{pending} claim(s) on these cats are awaiting review; "
-                "decide them in /moderation/claims before merging."
-            ),
-        )
-
-    # Move sightings, posts and notifications wholesale. Sighting-originated posts
-    # carry cat_id NULL and follow their sighting automatically, so only directly
-    # tagged posts need reassigning here.
-    db.query(Sighting).filter(Sighting.cat_id == source_id).update(
-        {Sighting.cat_id: target_id}, synchronize_session=False
-    )
-    db.query(ExplorerPost).filter(ExplorerPost.cat_id == source_id).update(
-        {ExplorerPost.cat_id: target_id}, synchronize_session=False
-    )
-    db.query(Notification).filter(Notification.cat_id == source_id).update(
-        {Notification.cat_id: target_id}, synchronize_session=False
-    )
-
-    # At most one side is verified (checked above), so reassigning claims is safe.
-    db.query(CatClaim).filter(CatClaim.cat_id == source_id).update(
-        {CatClaim.cat_id: target_id}, synchronize_session=False
-    )
-
-    db.flush()
-
-    # Recompute the target's denormalized aggregates from its combined sightings.
-    target.sighting_count = db.query(Sighting).filter(Sighting.cat_id == target_id).count()
-    latest = (
-        db.query(Sighting)
-        .filter(Sighting.cat_id == target_id)
-        .order_by(Sighting.spotted_at.desc())
-        .first()
-    )
-    if latest:
-        target.last_seen = latest.spotted_at
-        target.last_lat = latest.latitude
-        target.last_lng = latest.longitude
-        target.last_photo_path = latest.photo_path
-    target.rarity_score = compute_rarity_score(target.sighting_count, target.last_seen)
-
-    db.delete(source)
+    merge_cat_into(db, source, target)
     db.commit()
     db.refresh(target)
     return target

@@ -15,6 +15,8 @@ from app.models.claim import CatClaim, ClaimPhoto
 from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
 from app.models.notification import Notification
 from app.models.sighting import Sighting
+from app.models.trait_change import TraitChangeRequest
+from app.services.cat_merge import detach_cat_from_merge_requests
 from app.services.storage import UPLOADS_PREFIX, get_storage
 from app.utils.rarity import compute_rarity_score
 
@@ -77,6 +79,16 @@ def delete_cat(db: Session, cat: Cat) -> list[str]:
     """
     file_paths: list[str] = []
     db.query(Notification).filter(Notification.cat_id == cat.id).delete(synchronize_session=False)
+    # Trait suggestions are about this cat and nothing else, and cat_id is NOT
+    # NULL — leaving them behind doesn't merely orphan them, it makes the delete
+    # below fail outright on Postgres.
+    db.query(TraitChangeRequest).filter(TraitChangeRequest.cat_id == cat.id).delete(
+        synchronize_session=False
+    )
+    # Merge reports can name a cat other than this one, so they are let go of
+    # rather than deleted: pending ones are superseded, and the references
+    # nulled. Their name snapshots keep them readable.
+    detach_cat_from_merge_requests(db, cat.id)
     db.query(ExplorerPost).filter(ExplorerPost.cat_id == cat.id).update(
         {ExplorerPost.cat_id: None}, synchronize_session=False
     )

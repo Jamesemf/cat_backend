@@ -1,4 +1,4 @@
-"""The moderator side of the app: two review queues and the actions on them.
+"""The moderator side of the app: four review queues and the actions on them.
 
 Every endpoint here is admin-only (is_admin, set directly in the DB — same gate
 as catalog maintenance).
@@ -37,11 +37,19 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.db.session import get_db
 from app.models.cat import Cat
+from app.models.cat_merge import CatMergeRequest
 from app.models.claim import CatClaim, ClaimPhoto
 from app.models.explorer import ExplorerPost, PostReport
 from app.models.notification import Notification
 from app.models.trait_change import TraitChangeRequest
 from app.models.user import User
+from app.schemas.cat_merge import (
+    ApproveMergeIn,
+    MergeQueueCat,
+    MergeQueueItem,
+    MergeRequestResult,
+    RejectMergeIn,
+)
 from app.schemas.claim import (
     ClaimPhotoOut,
     ClaimQueueItem,
@@ -63,6 +71,7 @@ from app.schemas.trait_change import (
 )
 from app.routers.media import serve_upload
 from app.services.auth_service import require_admin
+from app.services.cat_merge import merge_cat_into
 from app.services.content_deletion import purge_post, safe_unlink
 from app.services.moderation import open_report_count
 from app.services.push import push_to_user
@@ -897,3 +906,302 @@ def reject_trait_change(
     return TraitChangeResult(
         request_id=request.id, status=request.status, cat_id=request.cat_id
     )
+
+
+# ---------------------------------------------------------------------------
+# Duplicate cats
+#
+# Re-ID sometimes misses a match, so one animal photographed twice becomes two
+# records holding half a history each. This fourth queue is for people saying so.
+#
+# Like trait corrections, deciding one is not a yes/no — but the judgement is
+# narrower: *whether* they are the same cat, and if so *which profile stays*.
+# The requester suggests a keeper; the moderator chooses, because which side
+# carries a verified owner or the longer history isn't visible from the app.
+# ---------------------------------------------------------------------------
+
+
+def _get_merge_request_or_404(db: Session, request_id: int) -> CatMergeRequest:
+    request = db.query(CatMergeRequest).filter(CatMergeRequest.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="That report no longer exists.")
+    return request
+
+
+def _merge_cat(
+    cat: Cat | None, verified_cat_ids: set[int], pending_counts: dict[int, int]
+) -> MergeQueueCat | None:
+    if cat is None:
+        return None
+    return MergeQueueCat(
+        cat_id=cat.id,
+        name=cat.name,
+        photo_path=cat.last_photo_path,
+        traits={k: getattr(cat, k, None) for k in COMPARED_FEATURES},
+        sighting_count=cat.sighting_count or 0,
+        first_seen=cat.first_seen,
+        last_seen=cat.last_seen,
+        has_verified_owner=cat.id in verified_cat_ids,
+        pending_claims=pending_counts.get(cat.id, 0),
+    )
+
+
+@router.get("/merges", response_model=list[MergeQueueItem])
+def list_merge_requests(
+    limit: int = 50,
+    offset: int = 0,
+    include_resolved: bool = False,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    """The duplicate-cats queue, oldest first.
+
+    Oldest-first like the claims and trait queues: there is no severity here,
+    only people waiting on an answer.
+    """
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    q = db.query(CatMergeRequest).options(
+        joinedload(CatMergeRequest.cat_a),
+        joinedload(CatMergeRequest.cat_b),
+        joinedload(CatMergeRequest.user),
+        joinedload(CatMergeRequest.reviewed_by),
+    )
+    if not include_resolved:
+        q = q.filter(CatMergeRequest.status == "pending")
+
+    rows = q.order_by(CatMergeRequest.created_at.asc()).offset(offset).limit(limit).all()
+    # A report whose cats have both gone has nothing left to show. One-sided
+    # rows are kept: that is what a superseded report looks like afterwards.
+    rows = [r for r in rows if r.cat_a is not None or r.cat_b is not None]
+
+    # Ownership and blockers for every cat on the page, in two queries rather
+    # than two per row.
+    cat_ids = {c.id for r in rows for c in (r.cat_a, r.cat_b) if c is not None}
+    verified_cat_ids: set[int] = set()
+    owners: dict[int, int] = {}
+    pending_counts: dict[int, int] = {}
+    if cat_ids:
+        owners = dict(
+            db.query(CatClaim.cat_id, CatClaim.user_id)
+            .filter(CatClaim.cat_id.in_(cat_ids), CatClaim.status == "verified")
+            .all()
+        )
+        verified_cat_ids = set(owners)
+        pending_counts = dict(
+            db.query(CatClaim.cat_id, func.count(CatClaim.id))
+            .filter(CatClaim.cat_id.in_(cat_ids), CatClaim.status == "pending")
+            .group_by(CatClaim.cat_id)
+            .all()
+        )
+
+    items: list[MergeQueueItem] = []
+    for r in rows:
+        # Owning *either* cat earns the badge — someone reporting a duplicate of
+        # their own cat is the most credible reporter there is.
+        is_owner = r.user_id is not None and any(
+            owners.get(cat_id) == r.user_id
+            for cat_id in (r.cat_a_id, r.cat_b_id)
+            if cat_id is not None
+        )
+        items.append(
+            MergeQueueItem(
+                request_id=r.id,
+                status=r.status,
+                created_at=r.created_at,
+                decided_at=r.decided_at,
+                requester_id=r.user_id,
+                requester_name=r.user.display_name if r.user else None,
+                requester_strikes=r.user.content_strikes if r.user else 0,
+                requester_banned=bool(r.user and r.user.banned_at is not None),
+                is_owner=is_owner,
+                cat_a=_merge_cat(r.cat_a, verified_cat_ids, pending_counts),
+                cat_b=_merge_cat(r.cat_b, verified_cat_ids, pending_counts),
+                cat_a_name=r.cat_a_name,
+                cat_b_name=r.cat_b_name,
+                suggested_keep_id=r.suggested_keep_id,
+                merged_into_cat_id=r.merged_into_cat_id,
+                note=r.note,
+                rejection_reason=r.rejection_reason,
+                reviewed_by_name=r.reviewed_by.display_name if r.reviewed_by else None,
+            )
+        )
+    return items
+
+
+@router.post("/merges/{request_id}/approve", response_model=MergeRequestResult)
+def approve_merge_request(
+    request_id: int,
+    body: ApproveMergeIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Agree the two are one cat, and keep the profile the moderator names.
+
+    Which one survives is the moderator's call, not the requester's — the
+    suggestion on the row is only what the queue seeded the choice with.
+    """
+    request = _get_merge_request_or_404(db, request_id)
+    if request.status != "pending":
+        raise HTTPException(
+            status_code=409, detail=f"This report was already {request.status}."
+        )
+
+    pair = (request.cat_a_id, request.cat_b_id)
+    if None in pair:
+        raise HTTPException(
+            status_code=409,
+            detail="One of these cats no longer exists, so there's nothing to merge.",
+        )
+    if body.keep_cat_id not in pair:
+        raise HTTPException(
+            status_code=400, detail="You can only keep one of the two reported cats."
+        )
+
+    target_id = body.keep_cat_id
+    source_id = pair[0] if pair[1] == target_id else pair[1]
+    source = db.query(Cat).filter(Cat.id == source_id).first()
+    target = db.query(Cat).filter(Cat.id == target_id).first()
+    if not source or not target:
+        raise HTTPException(status_code=404, detail="That cat no longer exists.")
+
+    kept_label = target.name or "the other profile"
+    # Read before the merge deletes the source out from under us.
+    merged_label = source.name or "a duplicate profile"
+
+    # Who owns either side, resolved before the merge repoints the claim and
+    # deletes the duplicate. At most one of the two can be verified-owned — the
+    # merge refuses otherwise — so this is one person at most.
+    owner_claim = (
+        db.query(CatClaim)
+        .filter(
+            CatClaim.cat_id.in_((source_id, target_id)),
+            CatClaim.status == "verified",
+        )
+        .first()
+    )
+    owner_id = owner_claim.user_id if owner_claim else None
+    owned_the_duplicate = owner_claim is not None and owner_claim.cat_id == source_id
+
+    # Raises 409 for the blockers the queue card shows up front (two verified
+    # owners, a claim still awaiting review). skip_request_id keeps this row out
+    # of the supersede sweep — it is being decided, not overtaken.
+    merge_cat_into(db, source, target, skip_request_id=request.id)
+
+    request.status = "merged"
+    request.merged_into_cat_id = target_id
+    request.reviewed_by_id = admin.id
+    request.decided_at = datetime.now(timezone.utc)
+
+    title = f"{merged_label} was merged into {kept_label}"
+    message = (
+        "Thanks — you were right that these were the same cat. Their sightings "
+        "are all on one profile now."
+    )
+    # The requester may have deleted their account since filing; the merge is
+    # still worth doing, there is just nobody left to tell.
+    if request.user_id is not None:
+        db.add(
+            Notification(
+                user_id=request.user_id,
+                type="merge_request_merged",
+                title=title,
+                body=message,
+                cat_id=target_id,
+            )
+        )
+
+    # Tell the owner their cat was involved. Claiming is the one standing per-cat
+    # subscription in the app, so a merge that moves ownership onto a different
+    # record — or quietly doubles a cat's history — is exactly the kind of thing
+    # that relationship exists for. Skipped when the owner is the requester, who
+    # is already being told above.
+    owner_title: str | None = None
+    owner_message: str | None = None
+    if owner_id is not None and owner_id != request.user_id:
+        if owned_the_duplicate:
+            owner_title = f"{merged_label} is now part of {kept_label}"
+            owner_message = (
+                f"A moderator confirmed these were the same cat. You still own "
+                f"them — their sightings and profile have moved to {kept_label}."
+            )
+        else:
+            owner_title = f"A duplicate of {kept_label} was merged in"
+            # No possessive on a cat's name — half of them end in "s".
+            owner_message = (
+                f"{merged_label} turned out to be the same cat, so those "
+                f"sightings have moved onto {kept_label}."
+            )
+        db.add(
+            Notification(
+                user_id=owner_id,
+                type="cat_merged",
+                title=owner_title,
+                body=owner_message,
+                cat_id=target_id,
+            )
+        )
+
+    db.commit()
+
+    # Only once the merge is durable.
+    if request.user_id is not None:
+        background_tasks.add_task(
+            push_to_user, request.user_id, title, message, {"cat_id": target_id}
+        )
+    if owner_title is not None:
+        background_tasks.add_task(
+            push_to_user, owner_id, owner_title, owner_message, {"cat_id": target_id}
+        )
+    log.info(
+        "Merge request %s approved by moderator %s (cat %s into cat %s)",
+        request.id, admin.id, source_id, target_id,
+    )
+    return MergeRequestResult(request_id=request.id, status=request.status)
+
+
+@router.post("/merges/{request_id}/reject", response_model=MergeRequestResult)
+def reject_merge_request(
+    request_id: int,
+    body: RejectMergeIn,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Turn a duplicate report down. Both cats are left exactly as they were."""
+    request = _get_merge_request_or_404(db, request_id)
+    if request.status != "pending":
+        raise HTTPException(
+            status_code=409, detail=f"This report was already {request.status}."
+        )
+
+    reason = (body.reason or "").strip() or (
+        "A moderator compared these two and they're different cats."
+    )
+
+    request.status = "rejected"
+    request.rejection_reason = reason
+    request.reviewed_by_id = admin.id
+    request.decided_at = datetime.now(timezone.utc)
+
+    title = "Those two are different cats"
+    if request.user_id is not None:
+        db.add(
+            Notification(
+                user_id=request.user_id,
+                type="merge_request_rejected",
+                title=title,
+                body=reason,
+                cat_id=request.cat_a_id or request.cat_b_id,
+            )
+        )
+    db.commit()
+
+    if request.user_id is not None:
+        background_tasks.add_task(
+            push_to_user, request.user_id, title, reason, {"cat_id": request.cat_a_id}
+        )
+    log.info("Merge request %s rejected by moderator %s", request.id, admin.id)
+    return MergeRequestResult(request_id=request.id, status=request.status)
