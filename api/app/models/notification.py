@@ -17,7 +17,16 @@ class Notification(Base):
     # claim_rejected | claim_revoked | meow | comment |
     # trait_change_pending | trait_change_applied | trait_change_rejected |
     # merge_request_pending | merge_request_merged | merge_request_rejected |
-    # cat_merged (to the verified owner of a cat that was merged)
+    # cat_merged (to the verified owner of a cat that was merged) |
+    # friend_request | friend_accepted |
+    # friend_new_cat | friend_sighting (a friend logged a spot)
+    #
+    # friend_request and friend_accepted carry no deep-link id: they route by
+    # type alone (to the requests tab and the friends list), and the other
+    # party's name is already in `body`. That is deliberately why there is no
+    # from_user_id column here — adding one would mean touching both halves of
+    # the startup migration block. The two friend_*cat/sighting types do carry
+    # cat_id and sighting_id, so they deep-link like any other spot.
     type: Mapped[str] = mapped_column(String, nullable=False)
     title: Mapped[str] = mapped_column(String, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)

@@ -101,6 +101,10 @@ class FeedItem(BaseModel):
     comment_count: int = 0
     meowed_by_me: bool = False
     is_mine: bool = False
+    # The spotter is an accepted friend of the viewer. Friends bypass the
+    # fog-of-paw mask on the client, so a friend's cat always renders as itself
+    # wherever it was seen. False for anonymous viewers and anonymous sightings.
+    is_friend: bool = False
     # This spot's post is withheld pending moderator review. Only ever true for
     # the spotter themselves (or an admin) — for everyone else it's filtered out
     # of the feed entirely.

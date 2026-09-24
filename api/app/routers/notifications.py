@@ -111,12 +111,18 @@ def delete_notifications(
     return {"deleted": deleted}
 
 
+def _prefs(user: User) -> NotificationPrefs:
+    return NotificationPrefs(
+        nearby_sightings=user.notify_nearby_sightings,
+        new_cat_in_area=user.notify_new_cat_in_area,
+        friend_new_cats=user.notify_friend_new_cats,
+        friend_sightings=user.notify_friend_sightings,
+    )
+
+
 @router.get("/preferences", response_model=NotificationPrefs)
 def get_preferences(current_user: User = Depends(get_current_user)):
-    return NotificationPrefs(
-        nearby_sightings=current_user.notify_nearby_sightings,
-        new_cat_in_area=current_user.notify_new_cat_in_area,
-    )
+    return _prefs(current_user)
 
 
 @router.put("/preferences", response_model=NotificationPrefs)
@@ -129,11 +135,12 @@ def update_preferences(
         current_user.notify_nearby_sightings = body.nearby_sightings
     if body.new_cat_in_area is not None:
         current_user.notify_new_cat_in_area = body.new_cat_in_area
+    if body.friend_new_cats is not None:
+        current_user.notify_friend_new_cats = body.friend_new_cats
+    if body.friend_sightings is not None:
+        current_user.notify_friend_sightings = body.friend_sightings
     db.commit()
-    return NotificationPrefs(
-        nearby_sightings=current_user.notify_nearby_sightings,
-        new_cat_in_area=current_user.notify_new_cat_in_area,
-    )
+    return _prefs(current_user)
 
 
 @router.post("/push-token", status_code=204)

@@ -18,6 +18,7 @@ from app.routers import (
     claims,
     exploration,
     explorer,
+    friends,
     media,
     moderation,
     notifications,
@@ -94,6 +95,14 @@ with engine.connect() as _conn:
             _conn.commit()
         if "notify_new_cat_in_area" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN notify_new_cat_in_area BOOLEAN NOT NULL DEFAULT 1"))
+            _conn.commit()
+        # Friend fan-out prefs. New cats default on, every-sighting defaults off
+        # — see the column comments in models/user.py.
+        if "notify_friend_new_cats" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN notify_friend_new_cats BOOLEAN NOT NULL DEFAULT 1"))
+            _conn.commit()
+        if "notify_friend_sightings" not in _u_cols:
+            _conn.execute(_text("ALTER TABLE users ADD COLUMN notify_friend_sightings BOOLEAN NOT NULL DEFAULT 0"))
             _conn.commit()
         if "is_admin" not in _u_cols:
             _conn.execute(_text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
@@ -227,6 +236,17 @@ with engine.connect() as _conn:
         _conn.commit()
         _conn.execute(_text(
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS catalog_layout TEXT"
+        ))
+        _conn.commit()
+        # Friend fan-out prefs. The two older notify_* columns aren't here
+        # because they predate this database — create_all built them. These
+        # don't, so an existing Postgres users table needs them added.
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_friend_new_cats BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+        _conn.commit()
+        _conn.execute(_text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_friend_sightings BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         _conn.commit()
         _conn.execute(_text(
@@ -518,6 +538,7 @@ app.include_router(cats.router)
 app.include_router(explorer.router)
 app.include_router(moderation.router)
 app.include_router(exploration.router)
+app.include_router(friends.router)
 app.include_router(users.router)
 
 

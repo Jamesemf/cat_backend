@@ -13,14 +13,24 @@ from app.models.exploration import ExploredTile
 from app.models.sighting import Sighting
 from app.models.user import User
 from app.schemas.cat import CatOut
+from app.schemas.friend import UserSearchOut
 from app.services.auth_service import get_current_user, get_optional_user
 from app.services.catalog import own_cover_photos
-from app.services.demo_seed import visible_cats_query
+from app.services.demo_seed import (
+    DEMO_ACCOUNT_EMAILS,
+    can_see_demo_content,
+    visible_cats_query,
+)
+from app.services.friends import pair_status, pair_statuses, spotted_cat_counts
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 # Cap how many cats we embed in a public profile response.
 MAX_PROFILE_CATS = 60
+
+# Cap on a search response, and the shortest query worth running.
+MAX_SEARCH_RESULTS = 25
+MIN_SEARCH_LENGTH = 2
 
 
 class PhotoAdjust(BaseModel):
@@ -46,6 +56,10 @@ class PublicProfileOut(BaseModel):
     cats: list[CatOut]
     frames: dict[str, str] = {}
     adjusts: dict[str, PhotoAdjust] = {}
+    # How the viewer stands with this spotter — none | outgoing | incoming |
+    # friends | self — so the profile can show the right Add Friend state without
+    # a second request. Always "none" for an anonymous viewer.
+    friend_status: str = "none"
 
 
 class CatalogLayoutIn(BaseModel):
@@ -113,6 +127,63 @@ def get_my_catalog(current_user: User = Depends(get_current_user)):
     is what stops that."""
     order, frames, covers, adjusts = _parse_layout(current_user.catalog_layout)
     return CatalogLayoutIn(order=order, frames=frames, covers=covers, adjusts=adjusts)
+
+
+@router.get("/search", response_model=list[UserSearchOut])
+def search_users(
+    q: str = "",
+    limit: int = MAX_SEARCH_RESULTS,
+    db: Session = Depends(get_db),
+    current_user: User | None = Depends(get_optional_user),
+):
+    """Find spotters by display name, so you can add someone you haven't met here.
+
+    Declared above /{user_id} — that route takes an int, so "search" reaching it
+    would 422 rather than fall through to here.
+
+    Only accounts that can actually answer a friend request are listed: active,
+    unbanned, verified, and named. A query shorter than MIN_SEARCH_LENGTH returns
+    nothing rather than erroring — that's the ordinary state while someone types,
+    not a mistake, and it also stops a single letter listing half the app.
+    """
+    q = (q or "").strip()
+    if len(q) < MIN_SEARCH_LENGTH:
+        return []
+    limit = max(1, min(limit, MAX_SEARCH_RESULTS))
+
+    query = db.query(User).filter(
+        User.display_name.isnot(None),
+        # ilike, not like: SQLite's LIKE is already ASCII-case-insensitive, and
+        # this makes Postgres behave the same way rather than only matching case.
+        User.display_name.ilike(f"%{q}%"),
+        User.is_active.is_(True),
+        User.banned_at.is_(None),
+        User.email_verified.is_(True),
+    )
+    if current_user is not None:
+        query = query.filter(User.id != current_user.id)
+    if not can_see_demo_content(current_user):
+        query = query.filter(User.email.notin_(DEMO_ACCOUNT_EMAILS))
+
+    rows = query.order_by(User.display_name).limit(limit).all()
+    if not rows:
+        return []
+
+    ids = [u.id for u in rows]
+    counts = spotted_cat_counts(db, ids, current_user)
+    statuses = (
+        pair_statuses(db, current_user.id, ids) if current_user is not None else {}
+    )
+    return [
+        UserSearchOut(
+            id=u.id,
+            display_name=u.display_name,
+            avatar_emoji=u.avatar_emoji,
+            cats_spotted=counts.get(u.id, 0),
+            friend_status=statuses.get(u.id, "none"),
+        )
+        for u in rows
+    ]
 
 
 @router.get("/{user_id}", response_model=PublicProfileOut)
@@ -186,4 +257,7 @@ def get_public_profile(
         cats=cat_out,
         frames=frames,
         adjusts=adjusts,
+        friend_status=(
+            pair_status(db, current_user.id, user_id) if current_user else "none"
+        ),
     )

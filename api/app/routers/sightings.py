@@ -2,6 +2,7 @@ import json
 import logging
 import math
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import func, or_
@@ -31,6 +32,7 @@ from app.models.user import User
 from app.services.auth_service import get_current_user, get_optional_user
 from app.services.content_deletion import recompute_cat_after_sighting_removal, safe_unlink
 from app.services.demo_seed import is_demo_user, relocate_demo_content, visible_cats_query, visible_sightings_query
+from app.services.friends import friend_ids
 from app.services.moderation import register_content_strike, sighting_has_hidden_post
 from app.services.push import push_to_user
 from app.services.rate_limit import enforce_daily_limit
@@ -376,8 +378,10 @@ def create_sighting(
                 {"cat_id": cat.id, "sighting_id": sighting.id},
             )
 
-    # Fan out to explorers of nearby tiles. The submitter and the owner
-    # (already notified above) are excluded.
+    # Fan out to the spotter's friends and to explorers of nearby tiles. The
+    # submitter and the owner (already notified above) are excluded. The spotter
+    # is passed separately as well as excluded — the fan-out needs to know whose
+    # friends to look up, which the exclude set alone can't say.
     background_tasks.add_task(
         notify_sighting_audiences,
         sighting.id,
@@ -387,6 +391,8 @@ def create_sighting(
         sighting.longitude,
         body.cat_id is None,
         {uid for uid in (submitter_id, owner_id) if uid is not None},
+        submitter_id,
+        current_user.display_name if current_user else None,
     )
 
     return sighting
@@ -466,6 +472,10 @@ def _serialize_feed_items(
                     .all()
                 }
 
+    # Who the viewer is friends with, so each card can say so. One indexed query
+    # for the whole list, and none at all for an anonymous caller.
+    friend_id_set = friend_ids(db, current_user.id) if current_user else set()
+
     items: list[FeedItem] = []
     for s in sightings:
         post = post_by_sighting.get(s.id)
@@ -497,6 +507,7 @@ def _serialize_feed_items(
                 comment_count=comment_counts.get(post.id, 0) if post else 0,
                 meowed_by_me=post.id in my_meows if post else False,
                 is_mine=bool(current_user and post and post.user_id == current_user.id),
+                is_friend=s.user_id is not None and s.user_id in friend_id_set,
                 hidden=bool(post and post.hidden_at is not None),
                 frame_id=s.frame_id,
                 photo_adjust=s.photo_adjust,
@@ -513,18 +524,49 @@ def get_feed(
     radius_km: float = 10.0,
     limit: int = 30,
     offset: int = 0,
+    scope: Literal["nearby", "friends"] = "nearby",
     db: Session = Depends(get_db),
     current_user: User | None = Depends(get_optional_user),
 ):
     """Recent sightings enriched with their cat's name and rarity score.
 
-    When lat/lng are provided, only sightings within radius_km are returned.
-    Falls back to the global feed when location is unavailable. Each item also
-    carries the interaction state of the Explorer post it was mirrored into, so
-    the Neighbourhood feed can like/comment/report each spot.
+    `scope=nearby` (the default, so older clients are unaffected) is the
+    Neighbourhood feed: when lat/lng are provided, only sightings within
+    radius_km are returned, falling back to the global feed when location is
+    unavailable.
+
+    `scope=friends` is every spot from the caller's friends, ignoring distance
+    entirely — the point of a friends feed is the friend who moved away, so lat,
+    lng and radius_km are all disregarded here.
+
+    Each item also carries the interaction state of the Explorer post it was
+    mirrored into, so the feed can like/comment/report each spot.
     """
     limit = max(1, min(limit, 100))
     offset = max(0, offset)
+
+    if scope == "friends":
+        if current_user is None:
+            raise HTTPException(
+                status_code=401, detail="Sign in to see your friends' spots."
+            )
+        ids = friend_ids(db, current_user.id)
+        if not ids:
+            return []
+        query = db.query(Sighting).options(
+            joinedload(Sighting.cat), joinedload(Sighting.user)
+        )
+        # Same moderation and demo filtering as nearby, applied in the same place,
+        # so a friend can't show you anything a stranger couldn't.
+        query = _visible_sightings(query, current_user)
+        # user_id is indexed. A pathologically long friend list would bloat this
+        # IN clause, but nothing at this app's scale comes close.
+        query = query.filter(Sighting.user_id.in_(ids))
+        sightings = (
+            query.order_by(Sighting.spotted_at.desc()).offset(offset).limit(limit).all()
+        )
+        return _serialize_feed_items(db, sightings, current_user)
+
     if is_demo_user(current_user):
         relocate_demo_content(db, lat, lng)
     query = db.query(Sighting).options(joinedload(Sighting.cat), joinedload(Sighting.user))

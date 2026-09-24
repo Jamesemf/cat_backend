@@ -33,6 +33,12 @@ class User(Base):
     # owner/social notifications are opt-in by their own actions.
     notify_nearby_sightings: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     notify_new_cat_in_area: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Friend fan-out, same file. Split because the two differ enormously in
+    # volume: a friend finding a cat nobody has logged is genuinely news, so it
+    # defaults on, while every routine re-sighting would be a firehose from an
+    # active friend — that one is opt-in.
+    notify_friend_new_cats: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    notify_friend_sightings: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Whether the email address has been confirmed via a verification code.
     # Email/password signups start False (a code is emailed on register);
     # Apple/Google signups are True since the provider already verified it.

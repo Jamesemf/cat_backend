@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from random import randint
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -494,6 +495,7 @@ def delete_me(
     from app.models.cat import Cat
     from app.models.cat_merge import CatMergeRequest
     from app.models.explorer import ExplorerPost, PostComment, PostMeow, PostReport
+    from app.models.friendship import Friendship
     from app.models.notification import Notification, PushToken
     from app.models.trait_change import TraitChangeRequest
     from app.services.content_deletion import delete_cat, delete_post_dependents, safe_unlink
@@ -589,7 +591,18 @@ def delete_me(
         if not has_sightings and not has_claims:
             files_to_unlink.extend(delete_cat(db, cat))
 
-    # 5. Inbox and devices, then the user row itself.
+    # 5. Friendships, in every state and both directions. A friendship owns
+    #    nothing, so there is no anonymous form for one to survive in — and
+    #    `requested_by_id` is always one of the pair columns, so this filter
+    #    already catches every row referencing this user. Explicit because SQLite
+    #    has no FK cascades and Postgres would refuse the delete below outright.
+    db.query(Friendship).filter(
+        or_(Friendship.user_low_id == uid, Friendship.user_high_id == uid)
+    ).delete(synchronize_session=False)
+
+    # 6. Inbox and devices, then the user row itself. Friend notifications the
+    #    departing user *sent* live on the other party's inbox as plain text with
+    #    no reference back here, so they survive untouched.
     db.query(Notification).filter(Notification.user_id == uid).delete(synchronize_session=False)
     db.query(PushToken).filter(PushToken.user_id == uid).delete(synchronize_session=False)
     db.delete(current_user)

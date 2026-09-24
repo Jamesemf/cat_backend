@@ -48,6 +48,8 @@ class DeleteIn(BaseModel):
 class NotificationPrefs(BaseModel):
     nearby_sightings: bool
     new_cat_in_area: bool
+    friend_new_cats: bool
+    friend_sightings: bool
 
 
 class NotificationPrefsUpdate(BaseModel):
@@ -55,3 +57,5 @@ class NotificationPrefsUpdate(BaseModel):
 
     nearby_sightings: bool | None = None
     new_cat_in_area: bool | None = None
+    friend_new_cats: bool | None = None
+    friend_sightings: bool | None = None
